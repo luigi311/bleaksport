@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from bleaksports.core import s
+from bleaksport.core import s
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

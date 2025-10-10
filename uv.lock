@@ -26,7 +26,7 @@ wheels = [
 ]
 
 [[package]]
-name = "bleak-sports"
+name = "bleaksport"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

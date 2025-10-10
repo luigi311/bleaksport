@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from bleak import BleakScanner
 
-from bleaksports.core import s
+from bleaksport.core import s
 
 if TYPE_CHECKING:
     from bleak.backends.device import BLEDevice
