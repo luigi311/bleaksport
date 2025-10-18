@@ -149,12 +149,10 @@ class RunningSession:
 
         total_distance_m = None
         if dist_present and len(data) >= off + 4:
-            # SIG says meters with 1/10 resolution for some libs; many pods send meters integer.
-            # Prefer meters*0.1 if your device follows that; here we use raw to be tolerant.
+            # SIG says meters with 1/10 resolution for some libs
             dist_raw = struct.unpack_from("<I", data, off)[0]
             off += 4
-            # Some pods (e.g., Stryd) send decimeters; if you want strict meters, change to / 10.0.
-            total_distance_m = float(dist_raw)
+            total_distance_m = float(dist_raw) * 0.1
 
         power = self._last.power_watts if self._last else None
         sample = RunningSample(
