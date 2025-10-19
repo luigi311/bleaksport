@@ -143,7 +143,6 @@ class MuxBase:
                     with contextlib.suppress(Exception):
                         role_presence = self._role_presence_from_client(client)
 
-                self._on_status(f"Connected: {addr} ({self._format_roles_for_status(roles)})")
                 # on_link signature is user-defined per subclass; common case: (addr, connected, *role_presence_by_order)
                 try:
                     if role_presence:
@@ -166,8 +165,6 @@ class MuxBase:
                 msg = str(e)
                 if INPROGRESS_RE.search(msg):
                     await asyncio.sleep(1.5)
-                else:
-                    self._on_status(f"BLE error @ {addr}: {e}")
             except Exception as e:
                 self._on_status(f"Unexpected error @ {addr}: {type(e).__name__}: {e}")
             finally:
