@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 UUID_RSCS = s(0x1814)
 UUID_CSCS = s(0x1816)
 UUID_CPS = s(0x1818)
-
+UUID_ESS = s(0x181A)
 
 async def discover_speed_cadence_devices(
     scan_timeout: float = 5.0,
@@ -53,6 +53,13 @@ async def discover_power_devices(
     devices = await BleakScanner.discover(timeout=scan_timeout, service_uuids=[UUID_CPS])
     return _filter_by_name(devices, name_contains)
 
+async def discover_ess_devices(
+    scan_timeout: float = 5.0,
+    name_contains: str | None = None,
+):
+    """Find devices advertising Environmental Sensing Service (ESS)."""
+    devices = await BleakScanner.discover(timeout=scan_timeout, service_uuids=[UUID_ESS])
+    return _filter_by_name(devices, name_contains)
 
 def _filter_by_name(devices: list[BLEDevice], name_contains: str | None) -> list[BLEDevice]:
     if not name_contains:
