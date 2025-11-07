@@ -3,16 +3,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import struct
 from typing import TYPE_CHECKING, Any
 
 from bleak import BleakClient, BleakError
 
+from bleaksport.core import s
 from bleaksport.linux_bluez import bluez_disconnect
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
 INPROGRESS_RE = re.compile(r"InProgress", re.IGNORECASE)
+UUID_SC_CONTROL_POINT = s(0x2A55)
 
 
 class MuxBase:
@@ -191,3 +194,50 @@ class MuxBase:
 
                 if not self._stop_evt.is_set():
                     await asyncio.sleep(self._reconnect_backoff_s)
+
+    async def _sc_cp_set_cumulative(
+        self,
+        client: BleakClient | None,
+        value_u32: int,
+        timeout_s: float = 3.0,
+    ) -> bool:
+        """
+        SC Control Point (0x2A55) 'Set Cumulative Value' for RSCS/CSCS.
+        - value_u32: raw uint32 parameter (RSCS: distance in 0.1 m; CSCS: wheel revs).
+
+        Returns:
+            bool: True on 'success' response, False otherwise.
+        """
+        if not client or not client.is_connected:
+            return False
+
+        OPCODE_SET_CUM = 0x01
+        OPCODE_RSP = 0x10
+
+        loop = asyncio.get_running_loop()
+        ack = loop.create_future()
+
+        def _on_ind(_h: int, data: bytearray) -> None:
+            if (
+                len(data) >= 3
+                and data[0] == OPCODE_RSP
+                and data[1] == OPCODE_SET_CUM
+                and not ack.done()
+            ):
+                # result code 0x01 = success per spec
+                ack.set_result(data[2] == 0x01)
+
+        # Ensure indications on the SCP char
+        with contextlib.suppress(Exception):
+            await client.start_notify(UUID_SC_CONTROL_POINT, _on_ind)
+
+        try:
+            payload = bytes([OPCODE_SET_CUM]) + struct.pack("<I", int(value_u32) & 0xFFFFFFFF)
+            await client.write_gatt_char(UUID_SC_CONTROL_POINT, payload, response=True)
+            try:
+                return bool(await asyncio.wait_for(ack, timeout=timeout_s))
+            except TimeoutError:
+                return False
+        finally:
+            # Keep indications enabled; harmless if already on
+            pass
