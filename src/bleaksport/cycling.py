@@ -276,3 +276,21 @@ class CyclingMux(MuxBase):
         present = [r for r in order if r in roles]
         extras = sorted(set(roles) - set(order))
         return ",".join(present + extras)
+
+    async def reset_wheel_revs(self) -> bool:
+        """Reset the cumulative wheel revolutions on the first active session's sensor.
+
+        Sends a request to set the CSCS cumulative wheel revolutions to zero for the
+        currently active session. If there is no active session, this returns False.
+
+        Returns:
+            bool: True if the reset command was sent / acknowledged (as returned by
+            _sc_cp_set_cumulative); False if no active session was found.
+        """
+        # CSCS: cumulative wheel revolutions; reset → 0
+        try:
+            addr, _ = next(iter(self._sessions.items()))
+        except StopIteration:
+            return False
+        client = self._clients.get(addr)
+        return await self._sc_cp_set_cumulative(client, 0)

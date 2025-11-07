@@ -292,3 +292,21 @@ class RunningMux(MuxBase):
         # Include any extra roles at the end just in case
         extras = sorted(set(roles) - set(order))
         return ",".join(present + extras)
+
+    async def reset_distance(self) -> bool:
+        """Reset the cumulative distance on the connected RSCS device.
+
+        This writes a zero cumulative distance to the first active session's client (RSCS),
+        which resets the device-reported total distance if the device supports the operation.
+
+        Returns:
+            bool: True if a reset was attempted (write dispatched), False if no active
+            session/client was available to perform the reset.
+        """
+        # RSCS: distance in 0.1 m; for “reset” we just write 0
+        try:
+            addr, _ = next(iter(self._sessions.items()))
+        except StopIteration:
+            return False
+        client = self._clients.get(addr)
+        return await self._sc_cp_set_cumulative(client, 0)
