@@ -10,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "bleak>=1.1.1",
+    "loguru>=0.7.3",
+    "pyftms>=0.4.15",
 ]
 
 [dependency-groups]
@@ -56,3 +58,6 @@ possibly-unbound-attribute = "error"
 possibly-unbound-import = "error"
 unresolved-attribute = "error"
 invalid-argument-type = "error"
+
+[tool.uv.sources]
+pyftms = { git = "https://github.com/luigi311/python-pyftms", branch = "dont_fail_on_gatt_read" }
