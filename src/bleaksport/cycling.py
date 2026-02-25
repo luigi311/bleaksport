@@ -11,7 +11,7 @@ from bleaksport.core import s
 from bleaksport.mux_base import MuxBase
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from bleak import BleakClient
     from bleak.backends.device import BLEDevice
@@ -63,10 +63,21 @@ class CyclingSession:
         """Subscribe to CSCS (+ CPS if available)."""
         if self._started:
             return
-        await client.start_notify(self.CHAR_CSCS, self._handle_csc)
+
+        started_any = False
+        with contextlib.suppress(Exception):
+            await client.start_notify(self.CHAR_CSCS, self._handle_csc)
+            started_any = True
+
         with contextlib.suppress(Exception):
             await client.start_notify(self.CHAR_CPS, self._handle_cp)
-        self._started = True
+            started_any = True
+
+        if not started_any:
+            msg = "No cycling characteristics could be subscribed"
+            raise RuntimeError(msg)
+
+        self._started = started_any
 
     async def stop(self, client: BleakClient) -> None:
         """Unsubscribe from CSCS and CPS."""
@@ -90,18 +101,27 @@ class CyclingSession:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         task = asyncio.create_task(_dispatch())
-        task.add_done_callback(lambda t: t.exception())
+
+        def _done(t: asyncio.Task) -> None:
+            exc = t.exception()
+            if exc:
+                print(f"Callback error: {exc!r}")
+
+        task.add_done_callback(_done)
 
     # ---- CSCS handler ----
     def _handle_csc(self, _h: int, data: bytearray) -> None:
         ts = time.time()
-        off = 0
-        flags = data[off]
-        off += 1
+        if len(data) < 1:
+            return
+        flags = data[0]
+        off = 1
         wheel_present = bool(flags & 0x01)
         crank_present = bool(flags & 0x02)
 
         cum_wheel = last_wheel_s = None
+        if wheel_present and len(data) < off + 6:
+            return
         if wheel_present:
             cum_wheel = struct.unpack_from("<I", data, off)[0]
             off += 4
@@ -110,6 +130,8 @@ class CyclingSession:
             last_wheel_s = last_wheel_evt_1024 / 1024.0
 
         cum_crank = last_crank_s = None
+        if crank_present and len(data) < off + 4:
+            return
         if crank_present:
             cum_crank = struct.unpack_from("<H", data, off)[0]
             off += 2
@@ -153,6 +175,8 @@ class CyclingSession:
     def _handle_cp(self, _h: int, data: bytearray) -> None:
         ts = time.time()
         off = 0
+        if len(data) < 4:
+            return
         off += 2  # flags
         inst_power = struct.unpack_from("<h", data, off)[0]
         off += 2
@@ -191,7 +215,7 @@ class CyclingMux(MuxBase):
         on_status: Callable[[str], None] | None = None,
         ble_lock: asyncio.Lock | None = None,
         reconnect_backoff_s: float = 2.0,
-        on_link: Callable[[str, bool, bool, bool], None] | None = None,
+        on_link: Callable[[str, bool, dict[str, bool]], None] | None = None,
     ) -> None:
         def _addr_of(x):
             if x is None:
@@ -269,9 +293,9 @@ class CyclingMux(MuxBase):
                 has_csc = bool(client.services.get_characteristic(UUID_CSC_MEAS))
             with contextlib.suppress(Exception):
                 has_cps = bool(client.services.get_characteristic(UUID_CP_MEAS))
-        return {"cps": has_cps, "csc": has_csc}
+        return {"csc": has_csc, "cps": has_cps}
 
-    def _format_roles_for_status(self, roles):
+    def _format_roles_for_status(self, roles: Iterable[str]) -> str:
         order = ["csc", "cps"]
         present = [r for r in order if r in roles]
         extras = sorted(set(roles) - set(order))
@@ -288,9 +312,7 @@ class CyclingMux(MuxBase):
             _sc_cp_set_cumulative); False if no active session was found.
         """
         # CSCS: cumulative wheel revolutions; reset → 0
-        try:
-            addr, _ = next(iter(self._sessions.items()))
-        except StopIteration:
-            return False
-        client = self._clients.get(addr)
-        return await self._sc_cp_set_cumulative(client, 0)
+        for addr, roles in self._roles_by_addr.items():
+            if "csc" in roles and addr in self._clients:
+                return await self._sc_cp_set_cumulative(self._clients[addr], 0)
+        return False

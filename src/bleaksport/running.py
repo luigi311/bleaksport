@@ -65,14 +65,21 @@ class RunningSession:
         """Subscribe to characteristics on an already-connected client."""
         if self._started:
             return
+
+        started_any = False
         # RSCS is preferred for running metrics; CPS is optional (power).
         with contextlib.suppress(Exception):
             await client.start_notify(self.CHAR_RSCS, self._handle_rsc)
+            started_any = True
         with contextlib.suppress(Exception):
             await client.start_notify(self.CHAR_CPS, self._handle_cp)
-        if not client.is_connected:
-            return
-        self._started = True
+            started_any = True
+
+        if not started_any:
+            msg = "No running characteristics could be subscribed"
+            raise RuntimeError(msg)
+
+        self._started = started_any
 
     async def stop(self, client: BleakClient) -> None:
         """Unsubscribe from notifications (ignores missing chars)."""
@@ -122,7 +129,11 @@ class RunningSession:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         task = asyncio.create_task(_dispatch())
-        task.add_done_callback(lambda t: t.exception())
+        def _done(t: asyncio.Task) -> None:
+            exc = t.exception()
+            if exc:
+                print(f"Callback error: {exc!r}")
+        task.add_done_callback(_done)
 
     # ---- RSCS (0x2A53) ----
     def _handle_rsc(self, _h: int, data: bytearray) -> None:
@@ -208,7 +219,7 @@ class RunningMux(MuxBase):
         on_status: Callable[[str], None] | None = None,
         ble_lock: asyncio.Lock | None = None,
         reconnect_backoff_s: float = 2.0,
-        on_link: Callable[[str, bool, bool, bool], None] | None = None,
+        on_link: Callable[[str, bool, dict[str, bool]], None] | None = None,
     ) -> None:
         # collapse speed+cadence roles to a single RSCS address if both point to the same device
         def _addr_of(x):
@@ -283,7 +294,7 @@ class RunningMux(MuxBase):
                 has_rsc = bool(client.services.get_characteristic(UUID_RSC_MEAS))
             with contextlib.suppress(Exception):
                 has_cps = bool(client.services.get_characteristic(UUID_CP_MEAS))
-        return {"cps": has_cps, "rsc": has_rsc}
+        return {"rsc": has_rsc, "cps": has_cps}
 
     def _format_roles_for_status(self, roles):
         # Ensure stable order in status string
@@ -304,9 +315,7 @@ class RunningMux(MuxBase):
             session/client was available to perform the reset.
         """
         # RSCS: distance in 0.1 m; for “reset” we just write 0
-        try:
-            addr, _ = next(iter(self._sessions.items()))
-        except StopIteration:
-            return False
-        client = self._clients.get(addr)
-        return await self._sc_cp_set_cumulative(client, 0)
+        for addr, roles in self._roles_by_addr.items():
+            if "rsc" in roles and addr in self._clients:
+                return await self._sc_cp_set_cumulative(self._clients[addr], 0)
+        return False
