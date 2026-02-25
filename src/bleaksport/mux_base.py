@@ -37,7 +37,7 @@ class MuxBase:
         on_status,
         ble_lock: asyncio.Lock | None = None,
         reconnect_backoff_s: float = 2.0,
-        on_link: Callable[[str, bool, bool, bool], None] | None = None,
+        on_link: Callable[[str, bool, dict[str, bool]], None] | None = None,
     ) -> None:
         self._on_status = on_status or (lambda _m: None)
         self._on_link = on_link or (lambda *_: None)
@@ -45,7 +45,7 @@ class MuxBase:
         self._reconnect_backoff_s = reconnect_backoff_s
 
         # Group desired roles by BLE address (strings only; extract .address if object)
-        def _addr_of(x):
+        def _addr_of(x) -> str | None:
             if not x:
                 return None
             if isinstance(x, str):
@@ -86,6 +86,10 @@ class MuxBase:
 
     # ---- public API ----
     async def start(self) -> None:
+        """
+        Start the multiplexed BLE sessions.
+        This will run until stop() is called or an unhandled exception occurs.
+        """
         if not self._roles_by_addr:
             self._on_status(f"{type(self).__name__}: no devices configured")
             return
@@ -96,6 +100,11 @@ class MuxBase:
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def stop(self) -> None:
+        """
+        Stop all sessions and disconnect.
+        This will attempt a clean shutdown of all sessions and BLE connections
+        but will not raise if errors occur.
+        """
         self._stop_evt.set()
         await asyncio.sleep(0)  # let loops observe stop
 
@@ -146,16 +155,17 @@ class MuxBase:
                     with contextlib.suppress(Exception):
                         role_presence = self._role_presence_from_client(client)
 
-                # on_link signature is user-defined per subclass; common case: (addr, connected, *role_presence_by_order)
+                # on_link signature is user-defined per subclass; common case:
+                # (addr, connected, *role_presence_by_order)
                 try:
                     if role_presence:
                         self._on_link(
                             addr,
                             True,
-                            *[role_presence.get(r, False) for r in sorted(role_presence)],
+                            role_presence,
                         )
                     else:
-                        self._on_link(addr, True, False, False)
+                        self._on_link(addr, True, {})
                 except Exception:
                     # Don't break if user provided a different arity; it’s just telemetry.
                     pass
@@ -173,7 +183,7 @@ class MuxBase:
             finally:
                 # Clean shutdown (serialize under lock; then tell BlueZ)
                 with contextlib.suppress(Exception):
-                    self._on_link(addr, False, False, False)
+                    self._on_link(addr, False, {})
 
                 try:
                     async with self._ble_lock:
@@ -239,5 +249,5 @@ class MuxBase:
             except TimeoutError:
                 return False
         finally:
-            # Keep indications enabled; harmless if already on
-            pass
+            with contextlib.suppress(Exception):
+                await client.stop_notify(UUID_SC_CONTROL_POINT)
