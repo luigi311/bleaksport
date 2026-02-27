@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 # Search for InProgress exceptions
 INPROGRESS_RE = re.compile(r"InProgress", re.IGNORECASE)
 
+
 @dataclass
 class TrainerSample:
     """Normalized indoor-training telemetry (FTMS update events).
@@ -75,6 +76,7 @@ class TrainerMux:
         ble_lock: asyncio.Lock | None = None,
         reconnect_backoff_s: float = 2.0,
         scan_timeout_s: float = 8.0,
+        sticky_ttl_s: float | None = 5.0,
     ) -> None:
         logger.debug(f"TrainerMux init: addr={addr}, device={device}, machine_type={machine_type}")
 
@@ -108,8 +110,15 @@ class TrainerMux:
         self._machine: Any | None = None
         self._machine_type: MachineType | None = None
 
+        # How long a metric can remain "sticky" without being updated.
+        # None => never expire.
+        self._sticky_ttl_s = None if sticky_ttl_s is None else float(sticky_ttl_s)
+
         # Store the last sample for sticky states as some only report changes every so often
         self._last: TrainerSample | None = None
+
+        # Per-field timestamp of last time we saw a non-None update for that field.
+        self._last_seen_ts: dict[str, float] = {}
 
     # ---------------- public API ----------------
 
@@ -307,7 +316,9 @@ class TrainerMux:
                     on_ftms_event=_on_ftms_event,
                 )
             elif self.addr:
-                logger.debug(f"attempting to connect via {self.addr} with scan_timeout={self._scan_timeout_s}")
+                logger.debug(
+                    f"attempting to connect via {self.addr} with scan_timeout={self._scan_timeout_s}"
+                )
                 machine = await get_client_from_address(
                     self.addr,
                     scan_timeout=self._scan_timeout_s,
@@ -320,7 +331,6 @@ class TrainerMux:
                 raise RuntimeError(msg)
 
             await machine.connect()
-
 
         self._machine = machine
         self._machine_type = machine_type
@@ -337,13 +347,16 @@ class TrainerMux:
             # some machines require this to start sending updates.
             await machine.start_resume()
 
-
     async def _disconnect(self) -> None:
         m = self._machine
         self._machine = None
         self._connected_evt.clear()
         if not m:
             return
+
+        # Wipe sticky cache
+        self._last = None
+        self._last_seen_ts.clear()
 
         async with self._ble_lock:
             with contextlib.suppress(Exception):
@@ -352,30 +365,63 @@ class TrainerMux:
     def _merge_last(self, new: TrainerSample) -> TrainerSample:
         prev = self._last
         if prev is None:
+            now = new.timestamp
+            for field in (
+                "speed_mps",
+                "cadence_rpm",
+                "power_watts",
+                "resistance_level",
+                "heart_rate_bpm",
+                "elapsed_s",
+                "distance_m",
+                "incline_percent",
+            ):
+                v = getattr(new, field)
+                if v is not None:
+                    self._last_seen_ts[field] = now
+
             return new
 
+        ttl = self._sticky_ttl_s
+        now = new.timestamp
+
+        def merged_value(field: str):
+            v_new = getattr(new, field)
+            if v_new is not None:
+                self._last_seen_ts[field] = now
+                return v_new
+
+            v_prev = getattr(prev, field)
+            if v_prev is None:
+                return None
+
+            # If no TTL, always keep previous.
+            if ttl is None:
+                return v_prev
+
+            last_seen = self._last_seen_ts.get(field, prev.timestamp)
+            if (now - last_seen) > ttl:
+                return None
+
+            return v_prev
+
         merged = TrainerSample(
-            timestamp=new.timestamp,
-            speed_mps=new.speed_mps if new.speed_mps is not None else prev.speed_mps,
-            cadence_rpm=new.cadence_rpm if new.cadence_rpm is not None else prev.cadence_rpm,
-            power_watts=new.power_watts if new.power_watts is not None else prev.power_watts,
-            resistance_level=(
-                new.resistance_level if new.resistance_level is not None else prev.resistance_level
-            ),
-            heart_rate_bpm=new.heart_rate_bpm
-            if new.heart_rate_bpm is not None
-            else prev.heart_rate_bpm,
-            elapsed_s=new.elapsed_s if new.elapsed_s is not None else prev.elapsed_s,
-            distance_m=new.distance_m if new.distance_m is not None else prev.distance_m,
-            incline_percent=new.incline_percent
-            if new.incline_percent is not None
-            else prev.incline_percent,
+            timestamp=now,
+            speed_mps=merged_value("speed_mps"),
+            cadence_rpm=merged_value("cadence_rpm"),
+            power_watts=merged_value("power_watts"),
+            resistance_level=merged_value("resistance_level"),
+            heart_rate_bpm=merged_value("heart_rate_bpm"),
+            elapsed_s=merged_value("elapsed_s"),
+            distance_m=merged_value("distance_m"),
+            incline_percent=merged_value("incline_percent"),
             machine_type=new.machine_type or prev.machine_type,
-            # Keep the most recent raw dict; optional: merge dicts if you prefer
             raw=new.raw or prev.raw,
         )
 
-        logger.trace(f"TrainerMux merging samples:\n  prev={prev}\n  new={new}\n  merged={merged}")
+        logger.trace(
+            f"merging samples (ttl={ttl}):\n  prev={prev}\n  new={new}\n  merged={merged}",
+        )
         return merged
 
     def _to_sample(
