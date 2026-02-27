@@ -1,0 +1,430 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import re
+import time
+from cmath import log
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from loguru import logger
+from pyftms import get_client, get_client_from_address
+
+from bleaksport.linux_bluez import bluez_disconnect
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from bleak.backends.device import BLEDevice
+    from pyftms import MachineType
+
+
+# Search for InProgress exceptions
+INPROGRESS_RE = re.compile(r"InProgress", re.IGNORECASE)
+
+@dataclass
+class TrainerSample:
+    """Normalized indoor-training telemetry (FTMS update events).
+
+    Fields are best-effort: many machines report only a subset.
+    """
+
+    timestamp: float
+
+    # Common across indoor bikes / trainers
+    speed_mps: float | None = None
+    cadence_rpm: float | None = None
+    power_watts: float | None = None
+    resistance_level: float | None = None
+    heart_rate_bpm: float | None = None
+    elapsed_s: float | None = None
+    distance_m: float | None = None
+
+    # Treadmill-ish
+    incline_percent: float | None = None
+
+    # Machine meta / raw passthrough
+    machine_type: MachineType | None = None
+    raw: dict[str, Any] | None = None
+
+
+class TrainerMux:
+    """
+    Orchestrates a single FTMS machine using pyftms.
+
+    Features:
+      - one address
+      - stable connect loop with backoff
+      - all BLE operations serialized under a shared ble_lock
+      - exposes a connected event so control writes never race connect
+      - best-effort BlueZ disconnect on failure to clear "InProgress" states
+
+    on_link(addr, connected, info_dict)
+    """
+
+    def __init__(
+        self,
+        *,
+        addr: str | BLEDevice | None = None,
+        device: BLEDevice | None = None,
+        machine_type: MachineType | None = None,
+        on_sample: Callable[[TrainerSample], Awaitable[None] | None] | None = None,
+        on_status: Callable[[str], None] | None = None,
+        on_link: Callable[[str, bool, dict[str, Any]], None] | None = None,
+        ble_lock: asyncio.Lock | None = None,
+        reconnect_backoff_s: float = 2.0,
+        scan_timeout_s: float = 8.0,
+    ) -> None:
+        logger.debug(f"TrainerMux init: addr={addr}, device={device}, machine_type={machine_type}")
+
+        def _addr_of(x):
+            if x is None:
+                return None
+            if isinstance(x, str):
+                return x
+            return getattr(x, "address", None)
+
+        self.addr = _addr_of(addr)
+        self._device = (
+            device if device is not None else (addr if not isinstance(addr, str) else None)
+        )
+        self._provided_machine_type = machine_type
+        self._on_sample = on_sample or (lambda _s: None)
+        self._on_status = on_status or (lambda _m: None)
+        self._on_link = on_link or (lambda *_: None)
+
+        self._ble_lock = ble_lock or asyncio.Lock()
+        self._reconnect_backoff_s = float(reconnect_backoff_s)
+        self._scan_timeout_s = float(scan_timeout_s)
+
+        self._stop_evt = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+        # Connection state
+        self._connected_evt = asyncio.Event()
+
+        # pyftms machine client (created on connect)
+        self._machine: Any | None = None
+        self._machine_type: MachineType | None = None
+
+        # Store the last sample for sticky states as some only report changes every so often
+        self._last: TrainerSample | None = None
+
+    # ---------------- public API ----------------
+
+    async def start(self) -> None:
+        """Run until stop() is called."""
+        logger.debug("TrainerMux starting")
+        if not self.addr:
+            msg = "no device configured"
+            self._on_status(msg)
+            logger.debug(msg)
+            return
+
+        self._stop_evt.clear()
+        self._task = asyncio.create_task(self._run())
+        await self._task
+
+    async def stop(self) -> None:
+        """Stop + disconnect (best-effort)."""
+        logger.debug("TrainerMux stopping")
+        self._stop_evt.set()
+        await asyncio.sleep(0)
+
+        if self._task:
+            self._task.cancel()
+            with contextlib.suppress(Exception):
+                await self._task
+            self._task = None
+
+        await self._disconnect()
+
+    async def wait_connected(self, timeout_s: float = 20.0) -> None:
+        """Wait until connected (useful for callers before sending ERG commands)."""
+        try:
+            await asyncio.wait_for(self._connected_evt.wait(), timeout=timeout_s)
+        except TimeoutError:
+            msg = "Timed out waiting for connection; not connected"
+            logger.warning(msg)
+            raise TimeoutError(msg)
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether currently connected (best-effort, may be slightly stale)."""
+        return self._connected_evt.is_set()
+
+    @property
+    def machine_type(self) -> MachineType | None:
+        """The type of the connected machine, if available."""
+        return self._machine_type
+
+    # ---- control helpers (serialized & connection-safe) ----
+
+    async def set_target_power(self, watts: int, *, timeout_s: float = 10.0) -> Any:
+        """ERG mode (Target Power). Returns pyftms ResultCode if available."""
+        logger.debug(f"TrainerMux set_target_power: watts={watts}")
+        await self.wait_connected(timeout_s=timeout_s)
+
+        m = self._machine
+        if not m or not hasattr(m, "set_target_power"):
+            msg = "set_target_power not supported by pyftms client"
+            logger.warning(msg)
+            raise RuntimeError(msg)
+
+        async with self._ble_lock:
+            return await m.set_target_power(int(watts))
+
+    async def set_resistance_level(self, level: float, *, timeout_s: float = 10.0) -> Any:
+        """
+        Resistance mode (Target Resistance Level or similar).
+
+        Returns pyftms ResultCode if available.
+        """
+        logger.debug(f"TrainerMux set_resistance_level: level={level}")
+        await self.wait_connected(timeout_s=timeout_s)
+
+        m = self._machine
+        if not m:
+            msg = "not connected"
+            logger.warning(msg)
+            raise RuntimeError(msg)
+
+        async with self._ble_lock:
+            for name in ("set_resistance_level", "set_target_resistance_level", "set_resistance"):
+                if hasattr(m, name):
+                    return await getattr(m, name)(level)
+
+        msg = "TrainerMux: resistance control not supported"
+        logger.warning(msg)
+        raise RuntimeError(msg)
+
+    async def set_treadmill_speed(self, speed_mps: float, *, timeout_s: float = 10.0) -> Any:
+        """Treadmill speed control. Returns pyftms ResultCode if available."""
+        logger.debug(f"TrainerMux set_treadmill_speed: speed_mps={speed_mps}")
+        await self.wait_connected(timeout_s=timeout_s)
+
+        m = self._machine
+        if not m:
+            msg = "not connected"
+            logger.warning(msg)
+            raise RuntimeError(msg)
+
+        async with self._ble_lock:
+            for name in ("set_target_speed", "set_speed"):
+                if hasattr(m, name):
+                    return await getattr(m, name)(speed_mps)
+
+        msg = "treadmill speed control not supported"
+        logger.warning(msg)
+        raise RuntimeError(msg)
+
+    async def set_treadmill_incline(
+        self, incline_percent: float, *, timeout_s: float = 10.0
+    ) -> Any:
+        """Treadmill incline control. Returns pyftms ResultCode if available."""
+        logger.debug(f"TrainerMux set_treadmill_incline: incline_percent={incline_percent}")
+        await self.wait_connected(timeout_s=timeout_s)
+
+        m = self._machine
+        if not m:
+            msg = "TrainerMux: not connected"
+            logger.warning(msg)
+            raise RuntimeError(msg)
+
+        async with self._ble_lock:
+            for name in ("set_target_inclination", "set_inclination", "set_incline"):
+                if hasattr(m, name):
+                    return await getattr(m, name)(incline_percent)
+
+        msg = "TrainerMux: treadmill incline control not supported"
+        logger.warning(msg)
+        raise RuntimeError(msg)
+
+    # ---------------- internals ----------------
+
+    async def _run(self) -> None:
+        logger.debug("TrainerMux run loop starting")
+        # Mimic MuxBase behavior: loop with backoff, clean disconnect, robust finally.
+        while not self._stop_evt.is_set():
+            try:
+                await self._connect_and_stream()
+
+                # Stay alive until stop requested or machine disappears.
+                while not self._stop_evt.is_set() and self._machine is not None:
+                    await asyncio.sleep(1.0)
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                if INPROGRESS_RE.search(str(e)):
+                    logger.warning("TrainerMux ble connection in progress, will retry")
+                else:
+                    msg = f"TrainerMux error @ {self.addr}: {type(e).__name__}: {e}"
+                    logger.error(msg)
+                    self._on_status(msg)
+            finally:
+                # Mirror MuxBase: always emit disconnected and try to clean up BlueZ state.
+                with contextlib.suppress(Exception):
+                    self._on_link(self.addr or "-", False, {})
+                await self._disconnect()
+                with contextlib.suppress(Exception):
+                    if self.addr:
+                        await bluez_disconnect(self.addr)
+
+            if not self._stop_evt.is_set():
+                await asyncio.sleep(self._reconnect_backoff_s)
+
+    async def _connect_and_stream(self) -> None:
+        logger.debug("TrainerMux: connecting and streaming")
+
+        machine_type = self._provided_machine_type
+
+        def _on_ftms_event(event: Any) -> None:
+            try:
+                if getattr(event, "event_id", None) != "update":
+                    return
+                data = dict(getattr(event, "event_data", {}) or {})
+                sample = self._to_sample(data, machine_type=machine_type)
+                sample = self._merge_last(sample)
+                self._last = sample
+
+                res = self._on_sample(sample)
+                if asyncio.iscoroutine(res):
+                    asyncio.create_task(res)
+            except Exception as e:
+                self._on_status(f"TrainerMux event handler error: {type(e).__name__}: {e}")
+
+        async with self._ble_lock:
+            if self._device is not None and self._provided_machine_type is not None:
+                logger.debug(
+                    "TrainerMux: using provided device and machine type to connect without scanning"
+                )
+                machine = get_client(
+                    self._device,
+                    self._provided_machine_type,
+                    timeout=5,
+                    on_ftms_event=_on_ftms_event,
+                )
+            elif self.addr:
+                logger.debug(f"attempting to connect via {self.addr} with scan_timeout={self._scan_timeout_s}")
+                machine = await get_client_from_address(
+                    self.addr,
+                    scan_timeout=self._scan_timeout_s,
+                    timeout=5,
+                    on_ftms_event=_on_ftms_event,
+                )
+            else:
+                msg = "cannot connect without device or address"
+                logger.error(msg)
+                raise RuntimeError(msg)
+
+            await machine.connect()
+
+
+        self._machine = machine
+        self._machine_type = machine_type
+        self._connected_evt.set()
+
+        info = {"ftms": True, "machine_type": machine_type}
+        with contextlib.suppress(Exception):
+            self._on_link(self.addr, True, info)
+
+        await self.wait_connected(timeout_s=5.0)
+
+        async with self._ble_lock:
+            # Send start/resume after setting up event handler and emitting connected;
+            # some machines require this to start sending updates.
+            await machine.start_resume()
+
+
+    async def _disconnect(self) -> None:
+        m = self._machine
+        self._machine = None
+        self._connected_evt.clear()
+        if not m:
+            return
+
+        async with self._ble_lock:
+            with contextlib.suppress(Exception):
+                await m.disconnect()
+
+    def _merge_last(self, new: TrainerSample) -> TrainerSample:
+        prev = self._last
+        if prev is None:
+            return new
+
+        merged = TrainerSample(
+            timestamp=new.timestamp,
+            speed_mps=new.speed_mps if new.speed_mps is not None else prev.speed_mps,
+            cadence_rpm=new.cadence_rpm if new.cadence_rpm is not None else prev.cadence_rpm,
+            power_watts=new.power_watts if new.power_watts is not None else prev.power_watts,
+            resistance_level=(
+                new.resistance_level if new.resistance_level is not None else prev.resistance_level
+            ),
+            heart_rate_bpm=new.heart_rate_bpm
+            if new.heart_rate_bpm is not None
+            else prev.heart_rate_bpm,
+            elapsed_s=new.elapsed_s if new.elapsed_s is not None else prev.elapsed_s,
+            distance_m=new.distance_m if new.distance_m is not None else prev.distance_m,
+            incline_percent=new.incline_percent
+            if new.incline_percent is not None
+            else prev.incline_percent,
+            machine_type=new.machine_type or prev.machine_type,
+            # Keep the most recent raw dict; optional: merge dicts if you prefer
+            raw=new.raw or prev.raw,
+        )
+
+        logger.trace(f"TrainerMux merging samples:\n  prev={prev}\n  new={new}\n  merged={merged}")
+        return merged
+
+    def _to_sample(
+        self, data: dict[str, Any], *, machine_type: MachineType | None
+    ) -> TrainerSample:
+        def _first(*keys: str) -> Any:
+            for k in keys:
+                if k in data and data[k] is not None:
+                    return data[k]
+            return None
+
+        ts = time.time()
+
+        # pyftms commonly reports speed in km/h (key often speed_instant)
+        speed_kmh = _first("speed_instant", "speed", "instant_speed", "speed_kmh")
+        speed_mps = None
+        if speed_kmh is not None:
+            try:
+                speed_mps = float(speed_kmh) / 3.6
+            except Exception:
+                speed_mps = None
+
+        cadence = _first("cadence_instant", "cadence", "instant_cadence", "cadence_rpm")
+        power = _first("power_instant", "power", "instant_power", "power_watts")
+        resistance = _first("resistance_level", "resistance", "target_resistance_level")
+        hr = _first("heart_rate", "heart_rate_bpm", "hr")
+        elapsed = _first("time_elapsed", "elapsed_time", "elapsed_s")
+        dist = _first("distance_total", "total_distance", "distance_m")
+        incline = _first("inclination", "incline", "incline_percent", "inclination_percent")
+
+        def _f(x):
+            try:
+                return float(x)
+            except Exception:
+                return None
+
+        sample = TrainerSample(
+            timestamp=ts,
+            speed_mps=_f(speed_mps),
+            cadence_rpm=_f(cadence),
+            power_watts=_f(power),
+            resistance_level=_f(resistance),
+            heart_rate_bpm=_f(hr),
+            elapsed_s=_f(elapsed),
+            distance_m=_f(dist),
+            incline_percent=_f(incline),
+            machine_type=machine_type,
+            raw=data,
+        )
+
+        logger.trace(f"TrainerMux converted data to sample: {sample}")
+        return sample
