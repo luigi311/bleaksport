@@ -333,6 +333,12 @@ class TrainerMux:
             await machine.connect()
 
         self._machine = machine
+
+        logger.debug(f"TrainerMux connected to machine: {machine}")
+        logger.debug(f"Supported properties: {machine.supported_properties}")
+        logger.debug(f"Supported settings: {machine.supported_settings}")
+        logger.debug(f"Supported ranges: {machine.supported_ranges}")
+
         self._machine_type = machine_type
         self._connected_evt.set()
 
