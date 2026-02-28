@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
-from pyftms import get_client, get_client_from_address
+from pyftms import FitnessMachine, ResultCode, get_client, get_client_from_address
 
 from bleaksport.linux_bluez import bluez_disconnect
 
@@ -34,16 +34,19 @@ class TrainerSample:
     timestamp: float
 
     # Common across indoor bikes / trainers
-    speed_mps: float | None = None
+    speed_kmh: float | None = None
     cadence_rpm: float | None = None
     power_watts: float | None = None
     resistance_level: float | None = None
     heart_rate_bpm: float | None = None
     elapsed_s: float | None = None
     distance_m: float | None = None
+    inclination: float | None = None
 
-    # Treadmill-ish
-    incline_percent: float | None = None
+    target_inclination: float | None = None
+    target_power: int | None = None
+    target_resistance: float | None = None
+    target_speed: float | None = None
 
     # Machine meta / raw passthrough
     machine_type: MachineType | None = None
@@ -107,7 +110,7 @@ class TrainerMux:
         self._connected_evt = asyncio.Event()
 
         # pyftms machine client (created on connect)
-        self._machine: Any | None = None
+        self._machine: FitnessMachine | None = None
         self._machine_type: MachineType | None = None
 
         # How long a metric can remain "sticky" without being updated.
@@ -170,85 +173,162 @@ class TrainerMux:
 
     # ---- control helpers (serialized & connection-safe) ----
 
-    async def set_target_power(self, watts: int, *, timeout_s: float = 10.0) -> Any:
-        """ERG mode (Target Power). Returns pyftms ResultCode if available."""
-        logger.debug(f"TrainerMux set_target_power: watts={watts}")
+    async def set_target_power(self, watts: int, *, timeout_s: float = 10.0) -> int:
+        """ERG mode (Target Power). Returns the watts set on success, raises on failure."""
+        watts = int(watts)
+        logger.debug(f"set_target_power: watts={watts}")
         await self.wait_connected(timeout_s=timeout_s)
-
-        m = self._machine
-        if not m or not hasattr(m, "set_target_power"):
-            msg = "set_target_power not supported by pyftms client"
+        if self._machine is None:
+            msg = "not connected"
             logger.warning(msg)
             raise RuntimeError(msg)
 
         async with self._ble_lock:
-            return await m.set_target_power(int(watts))
+            result = await self._machine.set_target_power(watts)
 
-    async def set_resistance_level(self, level: float, *, timeout_s: float = 10.0) -> Any:
+            if result == ResultCode.SUCCESS:
+                logger.debug("set_target_power succeeded")
+                return watts
+
+            msg = f"set_target_power failed with ResultCode: {result}"
+            logger.warning(msg)
+            raise RuntimeError(msg)
+
+    def get_target_power(self) -> int | None:
+        """Get current target power setting. Returns watts on success, None on failure."""
+        if self._machine is None:
+            msg = "not connected"
+            logger.warning(msg)
+            return None
+
+        watts = self._machine.target_power
+        if watts is not None:
+            try:
+                return int(watts)
+            except Exception:
+                return None
+        return None
+
+    async def set_target_resistance(self, level: float, *, timeout_s: float = 10.0) -> float:
         """
         Resistance mode (Target Resistance Level or similar).
 
-        Returns pyftms ResultCode if available.
+        Returns the level set on success, raises on failure.
         """
-        logger.debug(f"TrainerMux set_resistance_level: level={level}")
+        logger.debug(f"set_target_resistance: level={level}")
         await self.wait_connected(timeout_s=timeout_s)
 
-        m = self._machine
-        if not m:
+        if not self._machine:
             msg = "not connected"
             logger.warning(msg)
             raise RuntimeError(msg)
 
         async with self._ble_lock:
-            for name in ("set_resistance_level", "set_target_resistance_level", "set_resistance"):
-                if hasattr(m, name):
-                    return await getattr(m, name)(level)
+            result = await self._machine.set_target_resistance(level)
+            if result == ResultCode.SUCCESS:
+                logger.debug("set_target_resistance succeeded")
+                return level
 
-        msg = "TrainerMux: resistance control not supported"
-        logger.warning(msg)
-        raise RuntimeError(msg)
+            msg = f"set_target_resistance failed with ResultCode: {result}"
+            logger.warning(msg)
+            raise RuntimeError(msg)
 
-    async def set_treadmill_speed(self, speed_mps: float, *, timeout_s: float = 10.0) -> Any:
-        """Treadmill speed control. Returns pyftms ResultCode if available."""
-        logger.debug(f"TrainerMux set_treadmill_speed: speed_mps={speed_mps}")
+    def get_target_resistance(self) -> float | None:
+        """Get current target resistance level. Returns level on success, None on failure."""
+        if self._machine is None:
+            msg = "not connected"
+            logger.warning(msg)
+            return None
+
+        level = self._machine.target_resistance
+        if level is not None:
+            try:
+                return float(level)
+            except Exception:
+                return None
+        return None
+
+    async def set_target_speed(
+        self,
+        speed_kmh: float,
+        *,
+        timeout_s: float = 10.0,
+    ) -> float:
+        """Sets target speed in km/h. Returns the speed set on success, raises on failure."""
+        logger.debug(f"set_target_speed: speed_kmh={speed_kmh}")
         await self.wait_connected(timeout_s=timeout_s)
 
-        m = self._machine
-        if not m:
+        if not self._machine:
             msg = "not connected"
             logger.warning(msg)
             raise RuntimeError(msg)
 
         async with self._ble_lock:
-            for name in ("set_target_speed", "set_speed"):
-                if hasattr(m, name):
-                    return await getattr(m, name)(speed_mps)
+            result = await self._machine.set_target_speed(speed_kmh)
 
-        msg = "treadmill speed control not supported"
-        logger.warning(msg)
-        raise RuntimeError(msg)
+            if result == ResultCode.SUCCESS:
+                logger.debug("set_target_speed succeeded")
+                return speed_kmh
 
-    async def set_treadmill_incline(
-        self, incline_percent: float, *, timeout_s: float = 10.0
-    ) -> Any:
-        """Treadmill incline control. Returns pyftms ResultCode if available."""
-        logger.debug(f"TrainerMux set_treadmill_incline: incline_percent={incline_percent}")
+            msg = f"set_target_speed failed with ResultCode: {result}"
+            logger.warning(msg)
+            raise RuntimeError(msg)
+
+    def get_target_speed(self) -> float | None:
+        """Get current target speed. Returns speed in km/h on success, None on failure."""
+        if self._machine is None:
+            msg = "not connected"
+            logger.warning(msg)
+            return None
+
+        speed_kmh = self._machine.target_speed
+        if speed_kmh is not None:
+            try:
+                return float(speed_kmh)
+            except Exception:
+                return None
+        return None
+
+    async def set_target_inclination(
+        self,
+        incline_percent: float,
+        *,
+        timeout_s: float = 10.0,
+    ) -> float:
+        """Sets target inclination in percent. Returns the incline set on success, raises on failure."""
+        logger.debug(f"set_target_inclination: incline_percent={incline_percent}")
         await self.wait_connected(timeout_s=timeout_s)
 
-        m = self._machine
-        if not m:
-            msg = "TrainerMux: not connected"
+        if not self._machine:
+            msg = "Not connected"
             logger.warning(msg)
             raise RuntimeError(msg)
 
         async with self._ble_lock:
-            for name in ("set_target_inclination", "set_inclination", "set_incline"):
-                if hasattr(m, name):
-                    return await getattr(m, name)(incline_percent)
+            result = await self._machine.set_target_inclination(incline_percent)
 
-        msg = "TrainerMux: treadmill incline control not supported"
-        logger.warning(msg)
-        raise RuntimeError(msg)
+            if result == ResultCode.SUCCESS:
+                logger.debug("set_target_inclination succeeded")
+                return incline_percent
+
+            msg = f"set_target_inclination failed with ResultCode: {result}"
+            logger.warning(msg)
+            raise RuntimeError(msg)
+
+    def get_target_inclination(self) -> float | None:
+        """Get current target inclination. Returns incline in percent on success, None on failure."""
+        if self._machine is None:
+            msg = "Not connected"
+            logger.warning(msg)
+            return None
+
+        incline_percent = self._machine.target_inclination
+        if incline_percent is not None:
+            try:
+                return float(incline_percent)
+            except Exception:
+                return None
+        return None
 
     # ---------------- internals ----------------
 
@@ -373,14 +453,14 @@ class TrainerMux:
         if prev is None:
             now = new.timestamp
             for field in (
-                "speed_mps",
+                "speed_kmh",
                 "cadence_rpm",
                 "power_watts",
                 "resistance_level",
                 "heart_rate_bpm",
                 "elapsed_s",
                 "distance_m",
-                "incline_percent",
+                "inclination",
             ):
                 v = getattr(new, field)
                 if v is not None:
@@ -413,68 +493,67 @@ class TrainerMux:
 
         merged = TrainerSample(
             timestamp=now,
-            speed_mps=merged_value("speed_mps"),
+            speed_kmh=merged_value("speed_kmh"),
             cadence_rpm=merged_value("cadence_rpm"),
             power_watts=merged_value("power_watts"),
-            resistance_level=merged_value("resistance_level"),
             heart_rate_bpm=merged_value("heart_rate_bpm"),
             elapsed_s=merged_value("elapsed_s"),
             distance_m=merged_value("distance_m"),
-            incline_percent=merged_value("incline_percent"),
-            machine_type=new.machine_type or prev.machine_type,
-            raw=new.raw or prev.raw,
+            resistance_level=merged_value("resistance_level"),
+            inclination=merged_value("inclination"),
+            # Non-sticky fields (just take new)
+            target_inclination=new.target_inclination,
+            target_power=new.target_power,
+            target_resistance=new.target_resistance,
+            target_speed=new.target_speed,
+            machine_type=new.machine_type,
+            raw=new.raw,
         )
 
-        logger.trace(
-            f"merging samples (ttl={ttl}):\n  prev={prev}\n  new={new}\n  merged={merged}",
-        )
+        logger.trace(f"merging samples (ttl={ttl})")
+        logger.bind(data=prev).trace("Previous")
+        logger.bind(data=new).trace("New")
+        logger.bind(data=merged).trace("Merged")
+
         return merged
 
     def _to_sample(
-        self, data: dict[str, Any], *, machine_type: MachineType | None
+        self,
+        data: dict[str, Any],
+        *,
+        machine_type: MachineType | None,
     ) -> TrainerSample:
-        def _first(*keys: str) -> Any:
-            for k in keys:
-                if k in data and data[k] is not None:
-                    return data[k]
-            return None
-
         ts = time.time()
 
-        # pyftms commonly reports speed in km/h (key often speed_instant)
-        speed_kmh = _first("speed_instant", "speed", "instant_speed", "speed_kmh")
-        speed_mps = None
-        if speed_kmh is not None:
-            try:
-                speed_mps = float(speed_kmh) / 3.6
-            except Exception:
-                speed_mps = None
+        speed_kmh = data.get("speed_instant")
+        cadence = data.get("cadence_instant")
+        power = data.get("power_instant")
+        resistance = data.get("resistance_level")
+        hr = data.get("heart_rate")
+        elapsed = data.get("time_elapsed")
+        distance = data.get("distance_total")
+        inclination = data.get("inclination")
 
-        cadence = _first("cadence_instant", "cadence", "instant_cadence", "cadence_rpm")
-        power = _first("power_instant", "power", "instant_power", "power_watts")
-        resistance = _first("resistance_level", "resistance", "target_resistance_level")
-        hr = _first("heart_rate", "heart_rate_bpm", "hr")
-        elapsed = _first("time_elapsed", "elapsed_time", "elapsed_s")
-        dist = _first("distance_total", "total_distance", "distance_m")
-        incline = _first("inclination", "incline", "incline_percent", "inclination_percent")
-
-        def _f(x):
-            try:
-                return float(x)
-            except Exception:
-                return None
+        target_inclination = self.get_target_inclination()
+        target_power = self.get_target_power()
+        target_resistance = self.get_target_resistance()
+        target_speed = self.get_target_speed()
 
         sample = TrainerSample(
             timestamp=ts,
-            speed_mps=_f(speed_mps),
-            cadence_rpm=_f(cadence),
-            power_watts=_f(power),
-            resistance_level=_f(resistance),
-            heart_rate_bpm=_f(hr),
-            elapsed_s=_f(elapsed),
-            distance_m=_f(dist),
-            incline_percent=_f(incline),
+            speed_kmh=speed_kmh,
+            cadence_rpm=cadence,
+            power_watts=power,
+            resistance_level=resistance,
+            heart_rate_bpm=hr,
+            elapsed_s=elapsed,
+            distance_m=distance,
+            inclination=inclination,
             machine_type=machine_type,
+            target_inclination=target_inclination,
+            target_power=target_power,
+            target_resistance=target_resistance,
+            target_speed=target_speed,
             raw=data,
         )
 
