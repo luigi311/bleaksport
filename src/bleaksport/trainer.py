@@ -151,6 +151,9 @@ class TrainerMux:
             self._task = None
 
         await self._disconnect()
+        with contextlib.suppress(Exception):
+            if self.addr:
+                await bluez_disconnect(self.addr)
 
     async def wait_connected(self, timeout_s: float = 20.0) -> None:
         """Wait until connected (useful for callers before sending ERG commands)."""
