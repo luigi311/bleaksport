@@ -495,7 +495,7 @@ class TrainerMux:
         *,
         machine_type: MachineType | None,
     ) -> TrainerSample:
-        time_ms = time.time() * 1000
+        time_ms = int(time.time() * 1000)
 
         speed_kmh = data.get("speed_instant")
         cadence = data.get("cadence_instant")

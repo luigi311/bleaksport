@@ -127,7 +127,7 @@ class RunningSession:
     # ---- RSCS (0x2A53) ----
     def _handle_rsc(self, _h: int, data: bytearray) -> None:
         """Parse RSCS Measurement characteristic."""
-        time_ms = time.time() * 1000
+        time_ms = int(time.time() * 1000)
         off = 0
         flags = data[off]
         off += 1
@@ -169,7 +169,7 @@ class RunningSession:
     # ---- CPS (0x2A63) ----
     def _handle_cp(self, _h: int, data: bytearray) -> None:
         """Parse Cycling Power Measurement characteristic (for power only)."""
-        time_ms = time.time() * 1000
+        time_ms = int(time.time() * 1000)
         off = 0
         if len(data) < 4:
             return
@@ -253,7 +253,9 @@ class RunningMux(MuxBase):
             self._last = part.model_copy()
         else:
             self._last = RunningSample(
-                timestamp_ms=part.timestamp_ms if part.timestamp_ms is not None else self._last.timestamp_ms,
+                timestamp_ms=part.timestamp_ms
+                if part.timestamp_ms is not None
+                else self._last.timestamp_ms,
                 speed_mps=part.speed_mps if part.speed_mps is not None else self._last.speed_mps,
                 cadence_spm=part.cadence_spm
                 if part.cadence_spm is not None

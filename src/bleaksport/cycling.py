@@ -96,7 +96,7 @@ class CyclingSession:
 
     # ---- CSCS handler ----
     def _handle_csc(self, _h: int, data: bytearray) -> None:
-        time_ms = time.time() * 1000
+        time_ms = int(time.time() * 1000)
         if len(data) < 1:
             return
         flags = data[0]
@@ -158,7 +158,7 @@ class CyclingSession:
 
     # ---- CPS handler ----
     def _handle_cp(self, _h: int, data: bytearray) -> None:
-        time_ms = time.time() * 1000
+        time_ms = int(time.time() * 1000)
         off = 0
         if len(data) < 4:
             return

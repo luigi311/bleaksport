@@ -5,7 +5,7 @@ from pyftms import MachineType
 class BaseSample(BaseModel):
     """Base class for all samples."""
 
-    timestamp_ms: float
+    timestamp_ms: int
     distance_m: float | None = None
     power_watts: float | None = None
 
@@ -114,7 +114,7 @@ class TrainerSample(BaseSample):
 class HeartRateSample(BaseModel):
     """Heart rate sample, typically from a chest strap."""
 
-    timestamp_ms: float
+    timestamp_ms: int
     heart_rate_bpm: int | None = None
     rr_interval_ms: float | None = None
     energy_expended_kcal: float | None = None

@@ -87,7 +87,7 @@ class HeartRateSession:
             try:
                 # bleakheart unpack=True format: ("DATA", t_ns, (bpm, rr), energy)
                 _, t_ns, (bpm, rr), energy = event
-                t_ms = t_ns / 1e6
+                t_ms = int(t_ns / 1e6)
 
                 sample = HeartRateSample(
                     timestamp_ms=t_ms,
