@@ -7,7 +7,7 @@ class BaseSample(BaseModel):
 
     timestamp_ms: int
     distance_m: float | None = None
-    power_watts: float | None = None
+    power_watts: int | None = None
 
     @property
     def distance_km(self) -> float | None:
