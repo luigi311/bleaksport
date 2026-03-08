@@ -15,6 +15,17 @@ if TYPE_CHECKING:
 UUID_RSCS = s(0x1814)
 UUID_CSCS = s(0x1816)
 UUID_CPS = s(0x1818)
+UUID_HR = s(0x180D)
+
+
+async def discover_heart_rate_devices(
+    scan_timeout: float = 5.0,
+    name_contains: str | None = None,
+) -> list[BLEDevice]:
+    """Find devices advertising the standard Heart Rate Service (e.g., chest straps)."""
+    devices = await BleakScanner.discover(timeout=scan_timeout, service_uuids=[UUID_HR])
+    return _filter_by_name(devices, name_contains)
+
 
 async def discover_speed_cadence_devices(
     scan_timeout: float = 5.0,

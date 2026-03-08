@@ -5,12 +5,12 @@ import contextlib
 import re
 import struct
 import time
-from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from bleak import BleakError
 
 from bleaksport.core import s
+from bleaksport.models import RunningSample
 from bleaksport.mux_base import MuxBase
 
 if TYPE_CHECKING:
@@ -28,19 +28,6 @@ UUID_CP_MEAS = s(0x2A63)
 
 
 INPROGRESS_RE = re.compile(r"InProgress", re.IGNORECASE)
-
-
-@dataclass
-class RunningSample:
-    """A fused sample from RSCS and CPS."""
-
-    timestamp: float
-    speed_mps: float | None
-    cadence_spm: int | None
-    stride_length_m: float | None = None
-    total_distance_m: float | None = None
-    is_running: bool | None = None
-    power_watts: int | None = None
 
 
 class RunningSession:
@@ -69,10 +56,10 @@ class RunningSession:
         started_any = False
         # RSCS is preferred for running metrics; CPS is optional (power).
         with contextlib.suppress(Exception):
-            await client.start_notify(self.CHAR_RSCS, self._handle_rsc)
+            await client.start_notify(self.CHAR_RSCS, self._handle_rsc)  # ty:ignore[invalid-argument-type]
             started_any = True
         with contextlib.suppress(Exception):
-            await client.start_notify(self.CHAR_CPS, self._handle_cp)
+            await client.start_notify(self.CHAR_CPS, self._handle_cp)  # ty:ignore[invalid-argument-type]
             started_any = True
 
         if not started_any:
@@ -95,9 +82,9 @@ class RunningSession:
         # carry forward last-known values so consumers see a "complete" sample
         if self._last is not None:
             sample = RunningSample(
-                timestamp=sample.timestamp
-                if sample.timestamp is not None
-                else self._last.timestamp,
+                timestamp_ms=sample.timestamp_ms
+                if sample.timestamp_ms is not None
+                else self._last.timestamp_ms,
                 speed_mps=sample.speed_mps
                 if sample.speed_mps is not None
                 else self._last.speed_mps,
@@ -107,9 +94,9 @@ class RunningSession:
                 stride_length_m=sample.stride_length_m
                 if sample.stride_length_m is not None
                 else self._last.stride_length_m,
-                total_distance_m=sample.total_distance_m
-                if sample.total_distance_m is not None
-                else self._last.total_distance_m,
+                distance_m=sample.distance_m
+                if sample.distance_m is not None
+                else self._last.distance_m,
                 is_running=sample.is_running
                 if sample.is_running is not None
                 else self._last.is_running,
@@ -129,16 +116,18 @@ class RunningSession:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         task = asyncio.create_task(_dispatch())
+
         def _done(t: asyncio.Task) -> None:
             exc = t.exception()
             if exc:
                 print(f"Callback error: {exc!r}")
+
         task.add_done_callback(_done)
 
     # ---- RSCS (0x2A53) ----
     def _handle_rsc(self, _h: int, data: bytearray) -> None:
         """Parse RSCS Measurement characteristic."""
-        ts = time.time()
+        time_ms = time.time() * 1000
         off = 0
         flags = data[off]
         off += 1
@@ -167,11 +156,11 @@ class RunningSession:
 
         power = self._last.power_watts if self._last else None
         sample = RunningSample(
-            timestamp=ts,
+            timestamp_ms=time_ms,
             speed_mps=speed_mps,
             cadence_spm=int(cadence_spm),
             stride_length_m=stride_m,
-            total_distance_m=total_distance_m,
+            distance_m=total_distance_m,
             is_running=is_running,
             power_watts=power,
         )
@@ -180,7 +169,7 @@ class RunningSession:
     # ---- CPS (0x2A63) ----
     def _handle_cp(self, _h: int, data: bytearray) -> None:
         """Parse Cycling Power Measurement characteristic (for power only)."""
-        ts = time.time()
+        time_ms = time.time() * 1000
         off = 0
         if len(data) < 4:
             return
@@ -190,11 +179,11 @@ class RunningSession:
 
         prev = self._last
         sample = RunningSample(
-            timestamp=ts,
+            timestamp_ms=time_ms,
             speed_mps=(prev.speed_mps if prev else None),
             cadence_spm=(prev.cadence_spm if prev else None),
             stride_length_m=(prev.stride_length_m if prev else None),
-            total_distance_m=(prev.total_distance_m if prev else None),
+            distance_m=(prev.distance_m if prev else None),
             is_running=(prev.is_running if prev else None),
             power_watts=int(inst_power),
         )
@@ -261,10 +250,10 @@ class RunningMux(MuxBase):
 
     def _on_partial_sample(self, part: RunningSample) -> None:
         if self._last is None:
-            self._last = replace(part)
+            self._last = part.model_copy()
         else:
             self._last = RunningSample(
-                timestamp=part.timestamp or self._last.timestamp,
+                timestamp_ms=part.timestamp_ms if part.timestamp_ms is not None else self._last.timestamp_ms,
                 speed_mps=part.speed_mps if part.speed_mps is not None else self._last.speed_mps,
                 cadence_spm=part.cadence_spm
                 if part.cadence_spm is not None
@@ -272,9 +261,9 @@ class RunningMux(MuxBase):
                 stride_length_m=part.stride_length_m
                 if part.stride_length_m is not None
                 else self._last.stride_length_m,
-                total_distance_m=part.total_distance_m
-                if part.total_distance_m is not None
-                else self._last.total_distance_m,
+                distance_m=part.distance_m
+                if part.distance_m is not None
+                else self._last.distance_m,
                 is_running=part.is_running
                 if part.is_running is not None
                 else self._last.is_running,
