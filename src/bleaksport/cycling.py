@@ -4,10 +4,10 @@ import asyncio
 import contextlib
 import struct
 import time
-from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from bleaksport.core import s
+from bleaksport.models import CyclingSample
 from bleaksport.mux_base import MuxBase
 
 if TYPE_CHECKING:
@@ -21,21 +21,6 @@ UUID_CSCS = s(0x1816)
 UUID_CSC_MEAS = s(0x2A5B)
 UUID_CPS = s(0x1818)
 UUID_CP_MEAS = s(0x2A63)
-
-
-@dataclass
-class CyclingSample:
-    """A fused sample from CSCS and CPS."""
-
-    timestamp: float
-    cum_wheel_revs: int | None = None
-    last_wheel_event_time_s: float | None = None
-    cum_crank_revs: int | None = None
-    last_crank_event_time_s: float | None = None
-    power_watts: int | None = None
-    speed_mps: float | None = None
-    wheel_rpm: float | None = None
-    cadence_rpm: float | None = None
 
 
 class CyclingSession:
@@ -66,11 +51,11 @@ class CyclingSession:
 
         started_any = False
         with contextlib.suppress(Exception):
-            await client.start_notify(self.CHAR_CSCS, self._handle_csc)
+            await client.start_notify(self.CHAR_CSCS, self._handle_csc)  # ty:ignore[invalid-argument-type]
             started_any = True
 
         with contextlib.suppress(Exception):
-            await client.start_notify(self.CHAR_CPS, self._handle_cp)
+            await client.start_notify(self.CHAR_CPS, self._handle_cp)  # ty:ignore[invalid-argument-type]
             started_any = True
 
         if not started_any:
@@ -111,7 +96,7 @@ class CyclingSession:
 
     # ---- CSCS handler ----
     def _handle_csc(self, _h: int, data: bytearray) -> None:
-        ts = time.time()
+        time_ms = time.time() * 1000
         if len(data) < 1:
             return
         flags = data[0]
@@ -141,7 +126,7 @@ class CyclingSession:
 
         power = self._last.power_watts if self._last else None
         sample = CyclingSample(
-            timestamp=ts,
+            timestamp_ms=time_ms,
             cum_wheel_revs=cum_wheel,
             last_wheel_event_time_s=last_wheel_s,
             cum_crank_revs=cum_crank,
@@ -173,7 +158,7 @@ class CyclingSession:
 
     # ---- CPS handler ----
     def _handle_cp(self, _h: int, data: bytearray) -> None:
-        ts = time.time()
+        time_ms = time.time() * 1000
         off = 0
         if len(data) < 4:
             return
@@ -183,7 +168,7 @@ class CyclingSession:
 
         prev = self._last
         sample = CyclingSample(
-            timestamp=ts,
+            timestamp_ms=time_ms,
             cum_wheel_revs=prev.cum_wheel_revs if prev else None,
             last_wheel_event_time_s=prev.last_wheel_event_time_s if prev else None,
             cum_crank_revs=prev.cum_crank_revs if prev else None,
@@ -256,10 +241,12 @@ class CyclingMux(MuxBase):
     def _on_partial_sample(self, part: CyclingSample) -> None:
         # Fuse across devices (e.g., CSCS from one, CPS power from another)
         if self._last is None:
-            self._last = replace(part)
+            self._last = part.model_copy()
         else:
             self._last = CyclingSample(
-                timestamp=part.timestamp or self._last.timestamp,
+                timestamp_ms=part.timestamp_ms
+                if part.timestamp_ms is not None
+                else self._last.timestamp_ms,
                 cum_wheel_revs=part.cum_wheel_revs
                 if part.cum_wheel_revs is not None
                 else self._last.cum_wheel_revs,

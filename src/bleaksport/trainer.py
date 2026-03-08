@@ -4,14 +4,13 @@ import asyncio
 import contextlib
 import re
 import time
-from cmath import log
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 from pyftms import FitnessMachine, ResultCode, get_client, get_client_from_address
 
 from bleaksport.linux_bluez import bluez_disconnect
+from bleaksport.models import TrainerSample
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -22,35 +21,6 @@ if TYPE_CHECKING:
 
 # Search for InProgress exceptions
 INPROGRESS_RE = re.compile(r"InProgress", re.IGNORECASE)
-
-
-@dataclass
-class TrainerSample:
-    """Normalized indoor-training telemetry (FTMS update events).
-
-    Fields are best-effort: many machines report only a subset.
-    """
-
-    timestamp: float
-
-    # Common across indoor bikes / trainers
-    speed_kmh: float | None = None
-    cadence_rpm: float | None = None
-    power_watts: float | None = None
-    resistance_level: float | None = None
-    heart_rate_bpm: float | None = None
-    elapsed_s: float | None = None
-    distance_m: float | None = None
-    inclination: float | None = None
-
-    target_inclination: float | None = None
-    target_power: int | None = None
-    target_resistance: float | None = None
-    target_speed: float | None = None
-
-    # Machine meta / raw passthrough
-    machine_type: MachineType | None = None
-    raw: dict[str, Any] | None = None
 
 
 class TrainerMux:
@@ -454,7 +424,7 @@ class TrainerMux:
     def _merge_last(self, new: TrainerSample) -> TrainerSample:
         prev = self._last
         if prev is None:
-            now = new.timestamp
+            now = new.timestamp_ms
             for field in (
                 "speed_kmh",
                 "cadence_rpm",
@@ -472,7 +442,7 @@ class TrainerMux:
             return new
 
         ttl = self._sticky_ttl_s
-        now = new.timestamp
+        now = new.timestamp_ms
 
         def merged_value(field: str):
             v_new = getattr(new, field)
@@ -488,14 +458,14 @@ class TrainerMux:
             if ttl is None:
                 return v_prev
 
-            last_seen = self._last_seen_ts.get(field, prev.timestamp)
+            last_seen = self._last_seen_ts.get(field, prev.timestamp_ms)
             if (now - last_seen) > ttl:
                 return None
 
             return v_prev
 
         merged = TrainerSample(
-            timestamp=now,
+            timestamp_ms=now,
             speed_kmh=merged_value("speed_kmh"),
             cadence_rpm=merged_value("cadence_rpm"),
             power_watts=merged_value("power_watts"),
@@ -510,7 +480,6 @@ class TrainerMux:
             target_resistance=new.target_resistance,
             target_speed=new.target_speed,
             machine_type=new.machine_type,
-            raw=new.raw,
         )
 
         logger.trace(f"merging samples (ttl={ttl})")
@@ -526,7 +495,7 @@ class TrainerMux:
         *,
         machine_type: MachineType | None,
     ) -> TrainerSample:
-        ts = time.time()
+        time_ms = time.time() * 1000
 
         speed_kmh = data.get("speed_instant")
         cadence = data.get("cadence_instant")
@@ -543,7 +512,7 @@ class TrainerMux:
         target_speed = self.get_target_speed()
 
         sample = TrainerSample(
-            timestamp=ts,
+            timestamp_ms=time_ms,
             speed_kmh=speed_kmh,
             cadence_rpm=cadence,
             power_watts=power,
@@ -557,7 +526,6 @@ class TrainerMux:
             target_power=target_power,
             target_resistance=target_resistance,
             target_speed=target_speed,
-            raw=data,
         )
 
         logger.trace(f"TrainerMux converted data to sample: {sample}")
