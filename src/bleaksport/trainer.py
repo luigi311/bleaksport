@@ -383,10 +383,10 @@ class TrainerMux:
         logger.debug(f"Supported settings: {machine.supported_settings}")
         logger.debug(f"Supported ranges: {machine.supported_ranges}")
 
-        self._machine_type = machine_type
+        self._machine_type = machine_type or machine.machine_type
         self._connected_evt.set()
 
-        info = {"ftms": True, "machine_type": machine_type}
+        info = {"ftms": True, "machine_type": self._machine_type}
         with contextlib.suppress(Exception):
             self._on_link(self.addr, True, info)
 
