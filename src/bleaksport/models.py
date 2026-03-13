@@ -8,6 +8,7 @@ class BaseSample(BaseModel):
     timestamp_ms: int
     distance_m: float | None = None
     power_watts: int | None = None
+    altitude_m: float | None = None
 
     @property
     def distance_km(self) -> float | None:
@@ -82,6 +83,7 @@ class TrainerSample(BaseSample):
 
     # Common across indoor bikes / trainers
     speed_kmh: float | None = None
+    cadence_spm: int | None = None
     cadence_rpm: float | None = None
     resistance_level: float | None = None
     heart_rate_bpm: float | None = None

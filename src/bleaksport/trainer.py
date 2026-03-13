@@ -7,16 +7,16 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
-from pyftms import FitnessMachine, ResultCode, get_client, get_client_from_address
+from pyftms import FitnessMachine, MachineType, ResultCode, get_client, get_client_from_address
 
 from bleaksport.linux_bluez import bluez_disconnect
 from bleaksport.models import TrainerSample
+from bleaksport.utils import merged_value
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from bleak.backends.device import BLEDevice
-    from pyftms import MachineType
 
 
 # Search for InProgress exceptions
@@ -49,7 +49,6 @@ class TrainerMux:
         ble_lock: asyncio.Lock | None = None,
         reconnect_backoff_s: float = 2.0,
         scan_timeout_s: float = 8.0,
-        sticky_ttl_s: float | None = 5.0,
     ) -> None:
         logger.debug(f"TrainerMux init: addr={addr}, device={device}, machine_type={machine_type}")
 
@@ -83,15 +82,8 @@ class TrainerMux:
         self._machine: FitnessMachine | None = None
         self._machine_type: MachineType | None = None
 
-        # How long a metric can remain "sticky" without being updated.
-        # None => never expire.
-        self._sticky_ttl_s = None if sticky_ttl_s is None else float(sticky_ttl_s)
-
         # Store the last sample for sticky states as some only report changes every so often
         self._last: TrainerSample | None = None
-
-        # Per-field timestamp of last time we saw a non-None update for that field.
-        self._last_seen_ts: dict[str, float] = {}
 
     # ---------------- public API ----------------
 
@@ -360,7 +352,7 @@ class TrainerMux:
         async with self._ble_lock:
             if self._device is not None and self._provided_machine_type is not None:
                 logger.debug(
-                    "TrainerMux: using provided device and machine type to connect without scanning"
+                    "TrainerMux: using provided device and machine type to connect without scanning",
                 )
                 machine = get_client(
                     self._device,
@@ -392,10 +384,10 @@ class TrainerMux:
         logger.debug(f"Supported settings: {machine.supported_settings}")
         logger.debug(f"Supported ranges: {machine.supported_ranges}")
 
-        self._machine_type = machine_type
+        self._machine_type = machine_type or machine.machine_type
         self._connected_evt.set()
 
-        info = {"ftms": True, "machine_type": machine_type}
+        info = {"ftms": True, "machine_type": self._machine_type}
         with contextlib.suppress(Exception):
             self._on_link(self.addr, True, info)
 
@@ -415,7 +407,6 @@ class TrainerMux:
 
         # Wipe sticky cache
         self._last = None
-        self._last_seen_ts.clear()
 
         async with self._ble_lock:
             with contextlib.suppress(Exception):
@@ -424,56 +415,19 @@ class TrainerMux:
     def _merge_last(self, new: TrainerSample) -> TrainerSample:
         prev = self._last
         if prev is None:
-            now = new.timestamp_ms
-            for field in (
-                "speed_kmh",
-                "cadence_rpm",
-                "power_watts",
-                "resistance_level",
-                "heart_rate_bpm",
-                "elapsed_s",
-                "distance_m",
-                "inclination",
-            ):
-                v = getattr(new, field)
-                if v is not None:
-                    self._last_seen_ts[field] = now
-
             return new
 
-        ttl = self._sticky_ttl_s
-        now = new.timestamp_ms
-
-        def merged_value(field: str):
-            v_new = getattr(new, field)
-            if v_new is not None:
-                self._last_seen_ts[field] = now
-                return v_new
-
-            v_prev = getattr(prev, field)
-            if v_prev is None:
-                return None
-
-            # If no TTL, always keep previous.
-            if ttl is None:
-                return v_prev
-
-            last_seen = self._last_seen_ts.get(field, prev.timestamp_ms)
-            if (now - last_seen) > ttl:
-                return None
-
-            return v_prev
-
         merged = TrainerSample(
-            timestamp_ms=now,
-            speed_kmh=merged_value("speed_kmh"),
-            cadence_rpm=merged_value("cadence_rpm"),
-            power_watts=merged_value("power_watts"),
-            heart_rate_bpm=merged_value("heart_rate_bpm"),
-            elapsed_s=merged_value("elapsed_s"),
-            distance_m=merged_value("distance_m"),
-            resistance_level=merged_value("resistance_level"),
-            inclination=merged_value("inclination"),
+            timestamp_ms=new.timestamp_ms,
+            speed_kmh=merged_value(new, prev, "speed_kmh"),
+            cadence_rpm=merged_value(new, prev, "cadence_rpm"),
+            cadence_spm=merged_value(new, prev, "cadence_spm"),
+            power_watts=merged_value(new, prev, "power_watts"),
+            heart_rate_bpm=merged_value(new, prev, "heart_rate_bpm"),
+            elapsed_s=merged_value(new, prev, "elapsed_s"),
+            distance_m=merged_value(new, prev, "distance_m"),
+            resistance_level=merged_value(new, prev, "resistance_level"),
+            inclination=merged_value(new, prev, "inclination"),
             # Non-sticky fields (just take new)
             target_inclination=new.target_inclination,
             target_power=new.target_power,
@@ -482,7 +436,6 @@ class TrainerMux:
             machine_type=new.machine_type,
         )
 
-        logger.trace(f"merging samples (ttl={ttl})")
         logger.bind(data=prev).trace("Previous")
         logger.bind(data=new).trace("New")
         logger.bind(data=merged).trace("Merged")
@@ -514,7 +467,8 @@ class TrainerMux:
         sample = TrainerSample(
             timestamp_ms=time_ms,
             speed_kmh=speed_kmh,
-            cadence_rpm=cadence,
+            cadence_rpm=cadence if machine_type == MachineType.INDOOR_BIKE else None,
+            cadence_spm=cadence if machine_type == MachineType.TREADMILL else None,
             power_watts=power,
             resistance_level=resistance,
             heart_rate_bpm=hr,

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from bleaksport.core import s
 from bleaksport.models import CyclingSample
 from bleaksport.mux_base import MuxBase
+from bleaksport.utils import merged_value
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -244,29 +245,15 @@ class CyclingMux(MuxBase):
             self._last = part.model_copy()
         else:
             self._last = CyclingSample(
-                timestamp_ms=part.timestamp_ms
-                if part.timestamp_ms is not None
-                else self._last.timestamp_ms,
-                cum_wheel_revs=part.cum_wheel_revs
-                if part.cum_wheel_revs is not None
-                else self._last.cum_wheel_revs,
-                last_wheel_event_time_s=part.last_wheel_event_time_s
-                if part.last_wheel_event_time_s is not None
-                else self._last.last_wheel_event_time_s,
-                cum_crank_revs=part.cum_crank_revs
-                if part.cum_crank_revs is not None
-                else self._last.cum_crank_revs,
-                last_crank_event_time_s=part.last_crank_event_time_s
-                if part.last_crank_event_time_s is not None
-                else self._last.last_crank_event_time_s,
-                power_watts=part.power_watts
-                if part.power_watts is not None
-                else self._last.power_watts,
-                speed_mps=part.speed_mps if part.speed_mps is not None else self._last.speed_mps,
-                wheel_rpm=part.wheel_rpm if part.wheel_rpm is not None else self._last.wheel_rpm,
-                cadence_rpm=part.cadence_rpm
-                if part.cadence_rpm is not None
-                else self._last.cadence_rpm,
+                timestamp_ms=part.timestamp_ms,
+                cum_wheel_revs=merged_value(part, self._last, "cum_wheel_revs"),
+                last_wheel_event_time_s=merged_value(part, self._last, "last_wheel_event_time_s"),
+                cum_crank_revs=merged_value(part, self._last, "cum_crank_revs"),
+                last_crank_event_time_s=merged_value(part, self._last, "last_crank_event_time_s"),
+                power_watts=merged_value(part, self._last, "power_watts"),
+                speed_mps=merged_value(part, self._last, "speed_mps"),
+                wheel_rpm=merged_value(part, self._last, "wheel_rpm"),
+                cadence_rpm=merged_value(part, self._last, "cadence_rpm"),
             )
         res = self._user_on_sample(self._last)
         if asyncio.iscoroutine(res):
