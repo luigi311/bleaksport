@@ -4,11 +4,12 @@ import asyncio
 import contextlib
 import struct
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from bleaksport.core import s
 from bleaksport.models import CyclingSample
 from bleaksport.mux_base import MuxBase
+from bleaksport.utils import merged_value
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -245,14 +246,14 @@ class CyclingMux(MuxBase):
         else:
             self._last = CyclingSample(
                 timestamp_ms=part.timestamp_ms,
-                cum_wheel_revs=_merged_value(part, self._last, "cum_wheel_revs"),
-                last_wheel_event_time_s=_merged_value(part, self._last, "last_wheel_event_time_s"),
-                cum_crank_revs=_merged_value(part, self._last, "cum_crank_revs"),
-                last_crank_event_time_s=_merged_value(part, self._last, "last_crank_event_time_s"),
-                power_watts=_merged_value(part, self._last, "power_watts"),
-                speed_mps=_merged_value(part, self._last, "speed_mps"),
-                wheel_rpm=_merged_value(part, self._last, "wheel_rpm"),
-                cadence_rpm=_merged_value(part, self._last, "cadence_rpm"),
+                cum_wheel_revs=merged_value(part, self._last, "cum_wheel_revs"),
+                last_wheel_event_time_s=merged_value(part, self._last, "last_wheel_event_time_s"),
+                cum_crank_revs=merged_value(part, self._last, "cum_crank_revs"),
+                last_crank_event_time_s=merged_value(part, self._last, "last_crank_event_time_s"),
+                power_watts=merged_value(part, self._last, "power_watts"),
+                speed_mps=merged_value(part, self._last, "speed_mps"),
+                wheel_rpm=merged_value(part, self._last, "wheel_rpm"),
+                cadence_rpm=merged_value(part, self._last, "cadence_rpm"),
             )
         res = self._user_on_sample(self._last)
         if asyncio.iscoroutine(res):
@@ -289,11 +290,3 @@ class CyclingMux(MuxBase):
             if "csc" in roles and addr in self._clients:
                 return await self._sc_cp_set_cumulative(self._clients[addr], 0)
         return False
-
-def _merged_value(new: CyclingSample, last: CyclingSample, field: str) -> Any:
-    """Helper to merge a single field from new and last samples, preferring new if not None."""
-    v_new = getattr(new, field)
-    if v_new is not None:
-        return v_new
-
-    return getattr(last, field)

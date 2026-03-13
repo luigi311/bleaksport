@@ -11,6 +11,7 @@ from pyftms import FitnessMachine, MachineType, ResultCode, get_client, get_clie
 
 from bleaksport.linux_bluez import bluez_disconnect
 from bleaksport.models import TrainerSample
+from bleaksport.utils import merged_value
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -416,24 +417,17 @@ class TrainerMux:
         if prev is None:
             return new
 
-        def merged_value(field: str):
-            v_new = getattr(new, field)
-            if v_new is not None:
-                return v_new
-
-            return getattr(prev, field)
-
         merged = TrainerSample(
             timestamp_ms=new.timestamp_ms,
-            speed_kmh=merged_value("speed_kmh"),
-            cadence_rpm=merged_value("cadence_rpm"),
-            cadence_spm=merged_value("cadence_spm"),
-            power_watts=merged_value("power_watts"),
-            heart_rate_bpm=merged_value("heart_rate_bpm"),
-            elapsed_s=merged_value("elapsed_s"),
-            distance_m=merged_value("distance_m"),
-            resistance_level=merged_value("resistance_level"),
-            inclination=merged_value("inclination"),
+            speed_kmh=merged_value(new, prev, "speed_kmh"),
+            cadence_rpm=merged_value(new, prev, "cadence_rpm"),
+            cadence_spm=merged_value(new, prev, "cadence_spm"),
+            power_watts=merged_value(new, prev, "power_watts"),
+            heart_rate_bpm=merged_value(new, prev, "heart_rate_bpm"),
+            elapsed_s=merged_value(new, prev, "elapsed_s"),
+            distance_m=merged_value(new, prev, "distance_m"),
+            resistance_level=merged_value(new, prev, "resistance_level"),
+            inclination=merged_value(new, prev, "inclination"),
             # Non-sticky fields (just take new)
             target_inclination=new.target_inclination,
             target_power=new.target_power,
