@@ -49,7 +49,6 @@ class TrainerMux:
         ble_lock: asyncio.Lock | None = None,
         reconnect_backoff_s: float = 2.0,
         scan_timeout_s: float = 8.0,
-        sticky_ttl_s: float | None = 5.0,
     ) -> None:
         logger.debug(f"TrainerMux init: addr={addr}, device={device}, machine_type={machine_type}")
 
@@ -83,15 +82,8 @@ class TrainerMux:
         self._machine: FitnessMachine | None = None
         self._machine_type: MachineType | None = None
 
-        # How long a metric can remain "sticky" without being updated.
-        # None => never expire.
-        self._sticky_ttl_s = None if sticky_ttl_s is None else float(sticky_ttl_s)
-
         # Store the last sample for sticky states as some only report changes every so often
         self._last: TrainerSample | None = None
-
-        # Per-field timestamp of last time we saw a non-None update for that field.
-        self._last_seen_ts: dict[str, float] = {}
 
     # ---------------- public API ----------------
 
@@ -415,7 +407,6 @@ class TrainerMux:
 
         # Wipe sticky cache
         self._last = None
-        self._last_seen_ts.clear()
 
         async with self._ble_lock:
             with contextlib.suppress(Exception):
@@ -424,48 +415,17 @@ class TrainerMux:
     def _merge_last(self, new: TrainerSample) -> TrainerSample:
         prev = self._last
         if prev is None:
-            now = new.timestamp_ms
-            for field in (
-                "speed_kmh",
-                "cadence_rpm",
-                "power_watts",
-                "resistance_level",
-                "heart_rate_bpm",
-                "elapsed_s",
-                "distance_m",
-                "inclination",
-            ):
-                v = getattr(new, field)
-                if v is not None:
-                    self._last_seen_ts[field] = now
-
             return new
-
-        ttl = self._sticky_ttl_s
-        now = new.timestamp_ms
 
         def merged_value(field: str):
             v_new = getattr(new, field)
             if v_new is not None:
-                self._last_seen_ts[field] = now
                 return v_new
 
-            v_prev = getattr(prev, field)
-            if v_prev is None:
-                return None
-
-            # If no TTL, always keep previous.
-            if ttl is None:
-                return v_prev
-
-            last_seen = self._last_seen_ts.get(field, prev.timestamp_ms)
-            if (now - last_seen) > ttl:
-                return None
-
-            return v_prev
+            return getattr(prev, field)
 
         merged = TrainerSample(
-            timestamp_ms=now,
+            timestamp_ms=new.timestamp_ms,
             speed_kmh=merged_value("speed_kmh"),
             cadence_rpm=merged_value("cadence_rpm"),
             power_watts=merged_value("power_watts"),
@@ -482,7 +442,6 @@ class TrainerMux:
             machine_type=new.machine_type,
         )
 
-        logger.trace(f"merging samples (ttl={ttl})")
         logger.bind(data=prev).trace("Previous")
         logger.bind(data=new).trace("New")
         logger.bind(data=merged).trace("Merged")
