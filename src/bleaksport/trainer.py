@@ -7,7 +7,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
-from pyftms import FitnessMachine, ResultCode, get_client, get_client_from_address
+from pyftms import FitnessMachine, MachineType, ResultCode, get_client, get_client_from_address
 
 from bleaksport.linux_bluez import bluez_disconnect
 from bleaksport.models import TrainerSample
@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from bleak.backends.device import BLEDevice
-    from pyftms import MachineType
 
 
 # Search for InProgress exceptions
@@ -352,7 +351,7 @@ class TrainerMux:
         async with self._ble_lock:
             if self._device is not None and self._provided_machine_type is not None:
                 logger.debug(
-                    "TrainerMux: using provided device and machine type to connect without scanning"
+                    "TrainerMux: using provided device and machine type to connect without scanning",
                 )
                 machine = get_client(
                     self._device,
@@ -428,6 +427,7 @@ class TrainerMux:
             timestamp_ms=new.timestamp_ms,
             speed_kmh=merged_value("speed_kmh"),
             cadence_rpm=merged_value("cadence_rpm"),
+            cadence_spm=merged_value("cadence_spm"),
             power_watts=merged_value("power_watts"),
             heart_rate_bpm=merged_value("heart_rate_bpm"),
             elapsed_s=merged_value("elapsed_s"),
@@ -473,7 +473,8 @@ class TrainerMux:
         sample = TrainerSample(
             timestamp_ms=time_ms,
             speed_kmh=speed_kmh,
-            cadence_rpm=cadence,
+            cadence_rpm=cadence if machine_type == MachineType.INDOOR_BIKE else None,
+            cadence_spm=cadence if machine_type == MachineType.TREADMILL else None,
             power_watts=power,
             resistance_level=resistance,
             heart_rate_bpm=hr,
