@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import struct
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bleaksport.core import s
 from bleaksport.models import CyclingSample
@@ -244,29 +244,15 @@ class CyclingMux(MuxBase):
             self._last = part.model_copy()
         else:
             self._last = CyclingSample(
-                timestamp_ms=part.timestamp_ms
-                if part.timestamp_ms is not None
-                else self._last.timestamp_ms,
-                cum_wheel_revs=part.cum_wheel_revs
-                if part.cum_wheel_revs is not None
-                else self._last.cum_wheel_revs,
-                last_wheel_event_time_s=part.last_wheel_event_time_s
-                if part.last_wheel_event_time_s is not None
-                else self._last.last_wheel_event_time_s,
-                cum_crank_revs=part.cum_crank_revs
-                if part.cum_crank_revs is not None
-                else self._last.cum_crank_revs,
-                last_crank_event_time_s=part.last_crank_event_time_s
-                if part.last_crank_event_time_s is not None
-                else self._last.last_crank_event_time_s,
-                power_watts=part.power_watts
-                if part.power_watts is not None
-                else self._last.power_watts,
-                speed_mps=part.speed_mps if part.speed_mps is not None else self._last.speed_mps,
-                wheel_rpm=part.wheel_rpm if part.wheel_rpm is not None else self._last.wheel_rpm,
-                cadence_rpm=part.cadence_rpm
-                if part.cadence_rpm is not None
-                else self._last.cadence_rpm,
+                timestamp_ms=part.timestamp_ms,
+                cum_wheel_revs=_merged_value(part, self._last, "cum_wheel_revs"),
+                last_wheel_event_time_s=_merged_value(part, self._last, "last_wheel_event_time_s"),
+                cum_crank_revs=_merged_value(part, self._last, "cum_crank_revs"),
+                last_crank_event_time_s=_merged_value(part, self._last, "last_crank_event_time_s"),
+                power_watts=_merged_value(part, self._last, "power_watts"),
+                speed_mps=_merged_value(part, self._last, "speed_mps"),
+                wheel_rpm=_merged_value(part, self._last, "wheel_rpm"),
+                cadence_rpm=_merged_value(part, self._last, "cadence_rpm"),
             )
         res = self._user_on_sample(self._last)
         if asyncio.iscoroutine(res):
@@ -303,3 +289,11 @@ class CyclingMux(MuxBase):
             if "csc" in roles and addr in self._clients:
                 return await self._sc_cp_set_cumulative(self._clients[addr], 0)
         return False
+
+def _merged_value(new: CyclingSample, last: CyclingSample, field: str) -> Any:
+    """Helper to merge a single field from new and last samples, preferring new if not None."""
+    v_new = getattr(new, field)
+    if v_new is not None:
+        return v_new
+
+    return getattr(last, field)

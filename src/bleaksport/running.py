@@ -5,7 +5,7 @@ import contextlib
 import re
 import struct
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bleak import BleakError
 
@@ -82,27 +82,13 @@ class RunningSession:
         # carry forward last-known values so consumers see a "complete" sample
         if self._last is not None:
             sample = RunningSample(
-                timestamp_ms=sample.timestamp_ms
-                if sample.timestamp_ms is not None
-                else self._last.timestamp_ms,
-                speed_mps=sample.speed_mps
-                if sample.speed_mps is not None
-                else self._last.speed_mps,
-                cadence_spm=sample.cadence_spm
-                if sample.cadence_spm is not None
-                else self._last.cadence_spm,
-                stride_length_m=sample.stride_length_m
-                if sample.stride_length_m is not None
-                else self._last.stride_length_m,
-                distance_m=sample.distance_m
-                if sample.distance_m is not None
-                else self._last.distance_m,
-                is_running=sample.is_running
-                if sample.is_running is not None
-                else self._last.is_running,
-                power_watts=sample.power_watts
-                if sample.power_watts is not None
-                else self._last.power_watts,
+                timestamp_ms=sample.timestamp_ms,
+                speed_mps=_merged_value(sample, self._last, "speed_mps"),
+                cadence_spm=_merged_value(sample, self._last, "cadence_spm"),
+                stride_length_m=_merged_value(sample, self._last, "stride_length_m"),
+                distance_m=_merged_value(sample, self._last, "distance_m"),
+                is_running=_merged_value(sample, self._last, "is_running"),
+                power_watts=_merged_value(sample, self._last, "power_watts"),
             )
         self._last = sample
 
@@ -253,25 +239,13 @@ class RunningMux(MuxBase):
             self._last = part.model_copy()
         else:
             self._last = RunningSample(
-                timestamp_ms=part.timestamp_ms
-                if part.timestamp_ms is not None
-                else self._last.timestamp_ms,
-                speed_mps=part.speed_mps if part.speed_mps is not None else self._last.speed_mps,
-                cadence_spm=part.cadence_spm
-                if part.cadence_spm is not None
-                else self._last.cadence_spm,
-                stride_length_m=part.stride_length_m
-                if part.stride_length_m is not None
-                else self._last.stride_length_m,
-                distance_m=part.distance_m
-                if part.distance_m is not None
-                else self._last.distance_m,
-                is_running=part.is_running
-                if part.is_running is not None
-                else self._last.is_running,
-                power_watts=part.power_watts
-                if part.power_watts is not None
-                else self._last.power_watts,
+                timestamp_ms=part.timestamp_ms,
+                speed_mps=_merged_value(part, self._last, "speed_mps"),
+                cadence_spm=_merged_value(part, self._last, "cadence_spm"),
+                stride_length_m=_merged_value(part, self._last, "stride_length_m"),
+                distance_m=_merged_value(part, self._last, "distance_m"),
+                is_running=_merged_value(part, self._last, "is_running"),
+                power_watts=_merged_value(part, self._last, "power_watts"),
             )
         res = self._user_on_sample(self._last)
         if asyncio.iscoroutine(res):
@@ -310,3 +284,12 @@ class RunningMux(MuxBase):
             if "rsc" in roles and addr in self._clients:
                 return await self._sc_cp_set_cumulative(self._clients[addr], 0)
         return False
+
+
+def _merged_value(new: RunningSample, last: RunningSample, field: str) -> Any:
+    """Helper to merge a single field from new and last samples, preferring new if not None."""
+    v_new = getattr(new, field)
+    if v_new is not None:
+        return v_new
+
+    return getattr(last, field)
