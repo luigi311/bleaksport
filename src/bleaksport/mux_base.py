@@ -1,4 +1,5 @@
 from __future__ import annotations
+from loguru import logger
 
 import asyncio
 import contextlib
@@ -106,28 +107,16 @@ class MuxBase:
         but will not raise if errors occur.
         """
         self._stop_evt.set()
-        await asyncio.sleep(0)  # let loops observe stop
+        await asyncio.sleep(0)
 
+        logger.debug(f"Stop event received, cancelling {len(self._tasks)} device tasks")
         for t in self._tasks:
             t.cancel()
+
         with contextlib.suppress(Exception):
             await asyncio.gather(*self._tasks, return_exceptions=True)
+
         self._tasks.clear()
-
-        # Stop sessions + disconnect
-        for addr, sess in list(self._sessions.items()):
-            client = self._clients.get(addr)
-            if client:
-                with contextlib.suppress(Exception):
-                    await self._stop_session(sess, client)
-        for addr, client in list(self._clients.items()):
-            with contextlib.suppress(Exception):
-                await client.disconnect()
-            with contextlib.suppress(Exception):
-                await bluez_disconnect(addr)
-
-        self._sessions.clear()
-        self._clients.clear()
 
     # ---- core loop per address ----
     async def _run_device(self, addr: str, roles: set[str]) -> None:
@@ -146,9 +135,11 @@ class MuxBase:
                 self._sessions[addr] = session
 
                 # Best-effort service discovery for role presence
-                with contextlib.suppress(Exception):
+                try:
                     if hasattr(client, "get_services"):
                         await client.get_services()
+                except Exception as e:
+                    logger.warning(f"Failed to get services for {addr} {e}")
 
                 role_presence = {}
                 if hasattr(client, "services") and client.services is not None:
@@ -166,9 +157,8 @@ class MuxBase:
                         )
                     else:
                         self._on_link(addr, True, {})
-                except Exception:
-                    # Don't break if user provided a different arity; it’s just telemetry.
-                    pass
+                except Exception as e:
+                    logger.warning(f"on_link call failed for {addr} {e}")
 
                 # Stay alive until disconnected or stop
                 while client.is_connected and not self._stop_evt.is_set():
@@ -182,25 +172,44 @@ class MuxBase:
                 self._on_status(f"Unexpected error @ {addr}: {type(e).__name__}: {e}")
             finally:
                 # Clean shutdown (serialize under lock; then tell BlueZ)
+                logger.debug(f"Cleaning up {addr} device")
+
                 with contextlib.suppress(Exception):
                     self._on_link(addr, False, {})
+                    logger.debug("on_link nulled")
 
                 try:
-                    async with self._ble_lock:
-                        if addr in self._sessions:
-                            with contextlib.suppress(Exception):
-                                await self._stop_session(
-                                    self._sessions[addr], self._clients.get(addr)
-                                )
-                            self._sessions.pop(addr, None)
-                        if addr in self._clients:
-                            with contextlib.suppress(Exception):
-                                await self._clients[addr].disconnect()
-                            self._clients.pop(addr, None)
-                    with contextlib.suppress(Exception):
+                    if addr in self._sessions:
+                        try:
+                            logger.debug(f"Stopping sessions for {addr}")
+                            await self._stop_session(
+                                self._sessions[addr], self._clients.get(addr)
+                            )
+                            logger.debug(f"Session for {addr} stopped")
+                        except Exception as e:
+                            logger.warning(f"Stopping sessions failed for {addr} {e}")
+
+                        self._sessions.pop(addr, None)
+
+                    if addr in self._clients:
+                        try:
+                            logger.debug(f"Disconnecting {addr}")
+                            await self._clients[addr].disconnect()
+                            logger.debug(f"Disconnected {addr} successfully")
+                        except Exception as e:
+                            logger.warning(f"Disconnect failed for {addr} {e}")
+
+                        self._clients.pop(addr, None)
+
+                    try:
+                        logger.debug(f"Bluez disconnecting {addr}")
                         await bluez_disconnect(addr)
-                except Exception:
-                    pass
+                        logger.debug(f"Bluez disconnected {addr} successfully")
+                    except Exception as e:
+                        logger.warning(f"Bluez disconnect failed for {addr} {e}")
+
+                except Exception as e:
+                    logger.warning(f"Cleaning up sensor failed {addr} {e}")
 
                 if not self._stop_evt.is_set():
                     await asyncio.sleep(self._reconnect_backoff_s)
