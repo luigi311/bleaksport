@@ -9,18 +9,18 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "bleak>=2.1.1",
+    "bleak>=3.0.1",
     "bleakheart>=0.2.0",
     "dbus-next>=0.2.3",
     "loguru>=0.7.3",
-    "pydantic>=2.12.5",
+    "pydantic>=2.13.1",
     "pyftms>=0.4.15",
 ]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.15.6",
-    "ty>=0.0.23",
+    "ruff>=0.15.10",
+    "ty>=0.0.31",
     "vermin>=1.8.0",
 ]
 

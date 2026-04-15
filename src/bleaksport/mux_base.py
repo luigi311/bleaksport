@@ -1,5 +1,4 @@
 from __future__ import annotations
-from loguru import logger
 
 import asyncio
 import contextlib
@@ -8,6 +7,7 @@ import struct
 from typing import TYPE_CHECKING, Any
 
 from bleak import BleakClient, BleakError
+from loguru import logger
 
 from bleaksport.core import s
 from bleaksport.linux_bluez import bluez_disconnect
