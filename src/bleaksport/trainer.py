@@ -49,6 +49,7 @@ class TrainerMux:
         ble_lock: asyncio.Lock | None = None,
         reconnect_backoff_s: float = 2.0,
         scan_timeout_s: float = 8.0,
+        starting_resistance: float = 2.0,
     ) -> None:
         logger.debug(f"TrainerMux init: addr={addr}, device={device}, machine_type={machine_type}")
 
@@ -84,6 +85,9 @@ class TrainerMux:
 
         # Store the last sample for sticky states as some only report changes every so often
         self._last: TrainerSample | None = None
+
+        # Starting resistance when connecting to machine
+        self.starting_resistance: float = starting_resistance
 
     # ---------------- public API ----------------
 
@@ -140,7 +144,6 @@ class TrainerMux:
 
     async def set_target_power(self, watts: int, *, timeout_s: float = 10.0) -> int:
         """ERG mode (Target Power). Returns the watts set on success, raises on failure."""
-        watts = int(watts)
         logger.debug(f"set_target_power: watts={watts}")
         await self.wait_connected(timeout_s=timeout_s)
         if self._machine is None:
@@ -393,10 +396,13 @@ class TrainerMux:
 
         await self.wait_connected(timeout_s=5.0)
 
-        async with self._ble_lock:
-            # Send start/resume after setting up event handler and emitting connected;
-            # some machines require this to start sending updates.
-            await machine.start_resume()
+        # Send start/resume after setting up event handler and emitting connected;
+        # some machines require this to start sending updates.
+        await machine.start_resume()
+
+        logger.debug(f"Setting startup resistance level: {self.starting_resistance}")
+        await self.set_target_resistance(self.starting_resistance)
+
 
     async def _disconnect(self) -> None:
         m = self._machine
