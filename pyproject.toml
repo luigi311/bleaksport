@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
     "bleak>=3.0.1",
     "bleakheart>=0.2.0",
-    "dbus-next>=0.2.3",
+    "dbus-fast>=3.0.2",
     "loguru>=0.7.3",
     "pydantic>=2.13.1",
     "pyftms>=0.4.15",
