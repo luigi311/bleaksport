@@ -4,7 +4,8 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from dbus_next import MessageType
+from bleak import BleakError
+from dbus_fast import DBusError, Message, MessageType
 from pyftms import ResultCode
 
 from bleaksport import linux_bluez
@@ -13,9 +14,18 @@ from bleaksport.trainer import TrainerMux
 
 
 class _FakeBus:
-    def __init__(self, *, fail_connect=False, fail_call=False):
+    def __init__(
+        self,
+        *,
+        fail_connect=False,
+        fail_call=False,
+        error_reply=False,
+        fail_disconnect=False,
+    ):
         self.fail_connect = fail_connect
         self.fail_call = fail_call
+        self.error_reply = error_reply
+        self.fail_disconnect = fail_disconnect
         self.disconnect_called = False
         self.wait_called = False
 
@@ -29,14 +39,24 @@ class _FakeBus:
         if self.fail_call:
             msg = "method call failed"
             raise RuntimeError(msg)
-        return type(
-            "Reply",
-            (),
-            {"message_type": MessageType.METHOD_RETURN, "body": [], "error_name": None},
-        )()
+        if self.error_reply:
+            return Message(
+                message_type=MessageType.ERROR,
+                reply_serial=_message.serial or 1,
+                error_name="org.bluez.Error.Failed",
+                signature="s",
+                body=["BlueZ rejected disconnect"],
+            )
+        return Message(
+            message_type=MessageType.METHOD_RETURN,
+            reply_serial=_message.serial or 1,
+        )
 
     def disconnect(self):
         self.disconnect_called = True
+        if self.fail_disconnect:
+            msg = "disconnect cleanup failed"
+            raise RuntimeError(msg)
 
     async def wait_for_disconnect(self):
         self.wait_called = True
@@ -78,15 +98,42 @@ class BlueZDisconnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bus.disconnect_called)
         self.assertTrue(bus.wait_called)
 
+    async def test_bluez_error_reply_raises_dbus_error_and_closes_bus(self):
+        bus = _FakeBus(error_reply=True)
+        with (
+            patch.object(linux_bluez, "_is_linux", return_value=True),
+            patch.object(linux_bluez, "MessageBus", return_value=bus),
+            self.assertRaises(DBusError),
+        ):
+            await linux_bluez.bluez_disconnect("AA:BB:CC:DD:EE:FF")
+
+        self.assertTrue(bus.disconnect_called)
+        self.assertTrue(bus.wait_called)
+
+    async def test_disconnect_cleanup_error_does_not_replace_original_error(self):
+        bus = _FakeBus(fail_call=True, fail_disconnect=True)
+        with (
+            patch.object(linux_bluez, "_is_linux", return_value=True),
+            patch.object(linux_bluez, "MessageBus", return_value=bus),
+            self.assertRaisesRegex(RuntimeError, "method call failed"),
+        ):
+            await linux_bluez.bluez_disconnect("AA:BB:CC:DD:EE:FF")
+
+        self.assertTrue(bus.disconnect_called)
+        self.assertTrue(bus.wait_called)
+
 
 class _FakeBleakClient:
-    def __init__(self, *, disconnect_error=False):
+    def __init__(self, *, connect_error=None, disconnect_error=False):
+        self.connect_error = connect_error
         self.is_connected = False
         self.disconnect_error = disconnect_error
         self.disconnect_calls = 0
         self.services = None
 
     async def connect(self):
+        if self.connect_error:
+            raise self.connect_error
         self.is_connected = True
 
     async def disconnect(self):
@@ -99,7 +146,14 @@ class _FakeBleakClient:
 
 class _LifecycleMux(MuxBase):
     def __init__(self, *, start_error=None):
-        super().__init__(roles_to_addrs={"sensor": "AA:BB"}, on_status=lambda _msg: None)
+        self.statuses = []
+        self.status_event = asyncio.Event()
+
+        def on_status(message):
+            self.statuses.append(message)
+            self.status_event.set()
+
+        super().__init__(roles_to_addrs={"sensor": "AA:BB"}, on_status=on_status)
         self.start_error = start_error
         self.session_stopped = False
 
@@ -117,6 +171,22 @@ class _LifecycleMux(MuxBase):
 
 
 class MuxLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_inprogress_bleak_error_reports_device_context(self):
+        client = _FakeBleakClient(connect_error=BleakError("connection rejected"))
+        mux = _LifecycleMux()
+
+        with patch("bleaksport.mux_base.BleakClient", return_value=client):
+            task = asyncio.create_task(mux._run_device("AA:BB", {"sensor"}))
+            await asyncio.wait_for(mux.status_event.wait(), timeout=1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(
+            mux.statuses,
+            ["Bleak error @ AA:BB: BleakError: connection rejected"],
+        )
+
     async def test_partial_session_setup_still_disconnects_client(self):
         client = _FakeBleakClient()
         mux = _LifecycleMux(start_error=RuntimeError("session setup failed"))

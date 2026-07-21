@@ -425,9 +425,10 @@ class TrainerMux:
         self._last = None
 
         disconnected = True
-        # pyftms only calls BleakClient.disconnect() while is_connected is
-        # true. Capture the client first so a disconnect callback deleting
-        # machine._cli cannot prevent closure of Bleak's D-Bus connection.
+        # pyftms commit 7c828fc exposes only disconnect(), which skips cleanup
+        # once is_connected is false and whose disconnect callback deletes
+        # _cli. The dependency is pinned to that commit, so capture its client
+        # first and ensure Bleak's per-connection D-Bus bus is closed.
         client = getattr(m, "_cli", None)
         async with self._ble_lock:
             try:

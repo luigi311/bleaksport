@@ -173,6 +173,8 @@ class MuxBase:
                 if INPROGRESS_RE.search(msg):
                     needs_bluez_fallback = True
                     await asyncio.sleep(1.5)
+                else:
+                    self._on_status(f"Bleak error @ {addr}: {type(e).__name__}: {e}")
             except Exception as e:
                 self._on_status(f"Unexpected error @ {addr}: {type(e).__name__}: {e}")
             finally:

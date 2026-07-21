@@ -39,6 +39,7 @@ async def bluez_disconnect(mac: str) -> None:
             text = reply.body[0] if reply.body else error_name
             raise DBusError(error_name, text, reply=reply)
     finally:
-        bus.disconnect()
+        with contextlib.suppress(Exception):
+            bus.disconnect()
         with contextlib.suppress(Exception):
             await bus.wait_for_disconnect()
