@@ -116,9 +116,9 @@ class TrainerMux:
                 await self._task
             self._task = None
 
-        await self._disconnect()
-        with contextlib.suppress(Exception):
-            if self.addr:
+        disconnected = await self._disconnect()
+        if not disconnected and self.addr:
+            with contextlib.suppress(Exception):
                 await bluez_disconnect(self.addr)
 
     async def wait_connected(self, timeout_s: float = 20.0) -> None:
@@ -304,17 +304,19 @@ class TrainerMux:
         logger.debug("TrainerMux run loop starting")
         # Mimic MuxBase behavior: loop with backoff, clean disconnect, robust finally.
         while not self._stop_evt.is_set():
+            needs_bluez_fallback = False
             try:
                 await self._connect_and_stream()
 
                 # Stay alive until stop requested or machine disappears.
-                while not self._stop_evt.is_set() and self._machine is not None:
+                while not self._stop_evt.is_set() and self.is_connected:
                     await asyncio.sleep(1.0)
 
             except asyncio.CancelledError:
                 return
             except Exception as e:
                 if INPROGRESS_RE.search(str(e)):
+                    needs_bluez_fallback = True
                     logger.warning("TrainerMux ble connection in progress, will retry")
                 else:
                     msg = f"TrainerMux error @ {self.addr}: {type(e).__name__}: {e}"
@@ -324,9 +326,10 @@ class TrainerMux:
                 # Mirror MuxBase: always emit disconnected and try to clean up BlueZ state.
                 with contextlib.suppress(Exception):
                     self._on_link(self.addr or "-", False, {})
-                await self._disconnect()
-                with contextlib.suppress(Exception):
-                    if self.addr:
+                disconnected = await self._disconnect()
+                needs_bluez_fallback |= not disconnected
+                if needs_bluez_fallback and self.addr:
+                    with contextlib.suppress(Exception):
                         await bluez_disconnect(self.addr)
 
             if not self._stop_evt.is_set():
@@ -378,9 +381,17 @@ class TrainerMux:
                 logger.error(msg)
                 raise RuntimeError(msg)
 
-            await machine.connect()
+            # Own the machine before awaiting setup. pyftms can establish its
+            # Bleak connection and then fail while reading features or starting
+            # notifications; assigning early makes that partial client reachable
+            # by _disconnect().
+            self._machine = machine
 
-        self._machine = machine
+            def _on_machine_disconnect(_machine: FitnessMachine) -> None:
+                self._connected_evt.clear()
+
+            machine.set_disconnect_callback(_on_machine_disconnect)
+            await machine.connect()
 
         logger.debug(f"TrainerMux connected to machine: {machine}")
         logger.debug(f"Supported properties: {machine.supported_properties}")
@@ -403,20 +414,37 @@ class TrainerMux:
         logger.debug(f"Setting startup resistance level: {self.starting_resistance}")
         await self.set_target_resistance(self.starting_resistance)
 
-
-    async def _disconnect(self) -> None:
+    async def _disconnect(self) -> bool:
         m = self._machine
         self._machine = None
         self._connected_evt.clear()
         if not m:
-            return
+            return True
 
         # Wipe sticky cache
         self._last = None
 
+        disconnected = True
+        # pyftms commit 7c828fc exposes only disconnect(), which skips cleanup
+        # once is_connected is false and whose disconnect callback deletes
+        # _cli. The dependency is pinned to that commit, so capture its client
+        # first and ensure Bleak's per-connection D-Bus bus is closed.
+        client = getattr(m, "_cli", None)
         async with self._ble_lock:
-            with contextlib.suppress(Exception):
+            try:
                 await m.disconnect()
+            except Exception as e:
+                disconnected = False
+                logger.warning(f"Trainer disconnect failed: {e}")
+
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception as e:
+                    disconnected = False
+                    logger.warning(f"Trainer Bleak client disconnect failed: {e}")
+
+        return disconnected
 
     def _merge_last(self, new: TrainerSample) -> TrainerSample:
         prev = self._last

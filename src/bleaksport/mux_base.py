@@ -122,17 +122,21 @@ class MuxBase:
     async def _run_device(self, addr: str, roles: set[str]) -> None:
         while not self._stop_evt.is_set():
             client: BleakClient | None = None
+            session: Any = None
+            needs_bluez_fallback = False
             try:
                 # Connect + start session under the BLE lock
                 async with self._ble_lock:
                     client = BleakClient(addr, disconnected_callback=lambda _c: None)
                     await client.connect()
+                    # Register resources as soon as they exist. If session setup
+                    # fails or the task is cancelled, finally can still close the
+                    # Bleak client's per-connection D-Bus bus.
+                    self._clients[addr] = client
 
                     session = await self._make_session(client)
+                    self._sessions[addr] = session
                     await self._start_session(session, client)
-
-                self._clients[addr] = client
-                self._sessions[addr] = session
 
                 # Best-effort service discovery for role presence
                 try:
@@ -167,49 +171,52 @@ class MuxBase:
             except BleakError as e:
                 msg = str(e)
                 if INPROGRESS_RE.search(msg):
+                    needs_bluez_fallback = True
                     await asyncio.sleep(1.5)
+                else:
+                    self._on_status(f"Bleak error @ {addr}: {type(e).__name__}: {e}")
             except Exception as e:
                 self._on_status(f"Unexpected error @ {addr}: {type(e).__name__}: {e}")
             finally:
-                # Clean shutdown (serialize under lock; then tell BlueZ)
+                # Clean shutdown. The direct BlueZ call is only a fallback for
+                # an InProgress state or a Bleak disconnect that did not finish.
                 logger.debug(f"Cleaning up {addr} device")
 
                 with contextlib.suppress(Exception):
                     self._on_link(addr, False, {})
                     logger.debug("on_link nulled")
 
-                try:
-                    if addr in self._sessions:
+                session_to_stop = self._sessions.pop(addr, None) or session
+                client_to_disconnect = self._clients.pop(addr, None) or client
+
+                async with self._ble_lock:
+                    if session_to_stop is not None and client_to_disconnect is not None:
                         try:
                             logger.debug(f"Stopping sessions for {addr}")
-                            await self._stop_session(
-                                self._sessions[addr], self._clients.get(addr)
-                            )
+                            await self._stop_session(session_to_stop, client_to_disconnect)
                             logger.debug(f"Session for {addr} stopped")
                         except Exception as e:
                             logger.warning(f"Stopping sessions failed for {addr} {e}")
 
-                        self._sessions.pop(addr, None)
-
-                    if addr in self._clients:
+                    if client_to_disconnect is not None:
                         try:
                             logger.debug(f"Disconnecting {addr}")
-                            await self._clients[addr].disconnect()
+                            await client_to_disconnect.disconnect()
                             logger.debug(f"Disconnected {addr} successfully")
                         except Exception as e:
+                            needs_bluez_fallback = True
                             logger.warning(f"Disconnect failed for {addr} {e}")
 
-                        self._clients.pop(addr, None)
+                        with contextlib.suppress(Exception):
+                            needs_bluez_fallback |= bool(client_to_disconnect.is_connected)
 
+                if needs_bluez_fallback:
                     try:
-                        logger.debug(f"Bluez disconnecting {addr}")
+                        logger.debug(f"BlueZ fallback disconnecting {addr}")
                         await bluez_disconnect(addr)
-                        logger.debug(f"Bluez disconnected {addr} successfully")
+                        logger.debug(f"BlueZ fallback disconnected {addr} successfully")
                     except Exception as e:
-                        logger.warning(f"Bluez disconnect failed for {addr} {e}")
-
-                except Exception as e:
-                    logger.warning(f"Cleaning up sensor failed {addr} {e}")
+                        logger.warning(f"BlueZ fallback disconnect failed for {addr} {e}")
 
                 if not self._stop_evt.is_set():
                     await asyncio.sleep(self._reconnect_backoff_s)
