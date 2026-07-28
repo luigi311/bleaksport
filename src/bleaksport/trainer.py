@@ -140,6 +140,15 @@ class TrainerMux:
         """The type of the connected machine, if available."""
         return self._machine_type
 
+    @property
+    def supports_target_heart_rate(self) -> bool:
+        """Whether the connected machine advertises target-heart-rate control."""
+        return bool(
+            self.is_connected
+            and self._machine
+            and "target_heart_rate" in self._machine.supported_settings
+        )
+
     # ---- control helpers (serialized & connection-safe) ----
 
     async def set_target_power(self, watts: int, *, timeout_s: float = 10.0) -> int:
