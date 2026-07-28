@@ -374,9 +374,15 @@ class TrainerMux:
         logger.debug("TrainerMux: connecting and streaming")
 
         machine_type = self._provided_machine_type
+        machine: FitnessMachine | None = None
 
         def _on_ftms_event(event: Any) -> None:
             try:
+                # pyftms can deliver queued notifications after disconnect, or
+                # after a replacement machine has connected. Ignore callbacks
+                # that no longer belong to the mux's active machine.
+                if machine is None or self._machine is not machine:
+                    return
                 if getattr(event, "event_id", None) != "update":
                     return
                 data = dict(getattr(event, "event_data", {}) or {})

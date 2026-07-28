@@ -1,7 +1,8 @@
-# ruff: noqa: ANN001, ANN201, ANN202, ANN204, ARG002, D101, D102, I001, PT009, PT027, SIM117, SLF001
+# ruff: noqa: ANN001, ANN002, ANN003, ANN201, ANN202, ANN204, ARG002, D101, D102, I001, PT009, PT027, SIM117, SLF001
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from bleak import BleakError
@@ -285,6 +286,30 @@ class TrainerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         machine.disconnect_callback(machine)
         self.assertFalse(mux.is_connected)
         await mux._disconnect()
+
+    async def test_stale_machine_notifications_are_ignored_after_disconnect(self):
+        machine = _FakeMachine()
+        samples = []
+        captured_callback = None
+
+        def make_client(*_args, **kwargs):
+            nonlocal captured_callback
+            captured_callback = kwargs["on_ftms_event"]
+            return machine
+
+        mux = TrainerMux(addr=_Device(), machine_type=object(), on_sample=samples.append)
+        with patch("bleaksport.trainer.get_client", side_effect=make_client):
+            await mux._connect_and_stream()
+
+        await mux._disconnect()
+        captured_callback(
+            SimpleNamespace(
+                event_id="update",
+                event_data={"heart_rate": 99, "resistance_level": 19},
+            ),
+        )
+
+        self.assertEqual(samples, [])
 
 
 if __name__ == "__main__":
