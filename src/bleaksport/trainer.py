@@ -381,7 +381,7 @@ class TrainerMux:
                 # pyftms can deliver queued notifications after disconnect, or
                 # after a replacement machine has connected. Ignore callbacks
                 # that no longer belong to the mux's active machine.
-                if machine is None or self._machine is not machine:
+                if machine is None or self._machine is not machine or not self.is_connected:
                     return
                 if getattr(event, "event_id", None) != "update":
                     return

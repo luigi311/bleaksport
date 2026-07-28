@@ -288,28 +288,40 @@ class TrainerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await mux._disconnect()
 
     async def test_stale_machine_notifications_are_ignored_after_disconnect(self):
-        machine = _FakeMachine()
+        machine_a = _FakeMachine()
+        machine_b = _FakeMachine()
         samples = []
-        captured_callback = None
+        captured_callbacks = []
+        machines = iter((machine_a, machine_b))
 
         def make_client(*_args, **kwargs):
-            nonlocal captured_callback
-            captured_callback = kwargs["on_ftms_event"]
-            return machine
+            captured_callbacks.append(kwargs["on_ftms_event"])
+            return next(machines)
 
         mux = TrainerMux(addr=_Device(), machine_type=object(), on_sample=samples.append)
         with patch("bleaksport.trainer.get_client", side_effect=make_client):
             await mux._connect_and_stream()
 
-        await mux._disconnect()
-        captured_callback(
-            SimpleNamespace(
+            event = SimpleNamespace(
                 event_id="update",
                 event_data={"heart_rate": 99, "resistance_level": 19},
-            ),
-        )
+            )
 
-        self.assertEqual(samples, [])
+            # The low-level disconnect callback clears lifecycle state before
+            # TrainerMux._disconnect() clears its machine reference.
+            machine_a.disconnect_callback(machine_a)
+            self.assertIs(mux._machine, machine_a)
+            captured_callbacks[0](event)
+            self.assertEqual(samples, [])
+
+            # A queued callback from the replaced machine must also be ignored.
+            await mux._connect_and_stream()
+            self.assertIs(mux._machine, machine_b)
+            self.assertIsNot(captured_callbacks[0], captured_callbacks[1])
+            captured_callbacks[0](event)
+            self.assertEqual(samples, [])
+
+        await mux._disconnect()
 
 
 if __name__ == "__main__":
