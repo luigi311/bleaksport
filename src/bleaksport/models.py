@@ -94,6 +94,7 @@ class TrainerSample(BaseSample):
     target_power: int | None = None
     target_resistance: float | None = None
     target_speed: float | None = None
+    target_heart_rate: int | None = None
 
     # Machine meta / raw passthrough
     machine_type: MachineType | None = None
