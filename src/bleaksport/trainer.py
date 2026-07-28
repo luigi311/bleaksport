@@ -298,6 +298,41 @@ class TrainerMux:
                 return None
         return None
 
+    async def set_target_heart_rate(self, bpm: int, *, timeout_s: float = 10.0) -> int:
+        """Sets target Heart Rate in bpm. Returns the bpm set on success, raises on failure."""
+        logger.debug(f"set_target_heart_rate: bpm={bpm}")
+        await self.wait_connected(timeout_s=timeout_s)
+        if self._machine is None:
+            msg = "not connected"
+            logger.warning(msg)
+            raise RuntimeError(msg)
+
+        async with self._ble_lock:
+            result = await self._machine.set_target_heart_rate(bpm)
+
+            if result == ResultCode.SUCCESS:
+                logger.debug("set_target_heart_rate succeeded")
+                return bpm
+
+            msg = f"set_target_heart_rate failed with ResultCode: {result}"
+            logger.warning(msg)
+            raise RuntimeError(msg)
+
+    def get_target_heart_rate(self) -> int | None:
+        """Get current target heart rate setting. Returns bpm on success, None on failure."""
+        if self._machine is None:
+            msg = "not connected"
+            logger.warning(msg)
+            return None
+
+        bpm = self._machine.target_heart_rate
+        if bpm is not None:
+            try:
+                return int(bpm)
+            except (TypeError, ValueError, OverflowError):
+                return None
+        return None
+
     # ---------------- internals ----------------
 
     async def _run(self) -> None:
@@ -467,6 +502,7 @@ class TrainerMux:
             target_power=new.target_power,
             target_resistance=new.target_resistance,
             target_speed=new.target_speed,
+            target_heart_rate=new.target_heart_rate,
             machine_type=new.machine_type,
         )
 
@@ -497,6 +533,7 @@ class TrainerMux:
         target_power = self.get_target_power()
         target_resistance = self.get_target_resistance()
         target_speed = self.get_target_speed()
+        target_heart_rate = self.get_target_heart_rate()
 
         sample = TrainerSample(
             timestamp_ms=time_ms,
@@ -514,6 +551,7 @@ class TrainerMux:
             target_power=target_power,
             target_resistance=target_resistance,
             target_speed=target_speed,
+            target_heart_rate=target_heart_rate,
         )
 
         logger.trace(f"TrainerMux converted data to sample: {sample}")
