@@ -228,14 +228,14 @@ class _TrainerBleakClient:
 
 
 class _FakeMachine:
-    def __init__(self, *, connect_error=None):
+    def __init__(self, *, connect_error=None, supported_settings=None):
         self.connect_error = connect_error
         self._cli = _TrainerBleakClient()
         self.disconnect_calls = 0
         self.disconnect_callback = None
         self.machine_type = object()
         self.supported_properties = []
-        self.supported_settings = []
+        self.supported_settings = supported_settings or []
         self.supported_ranges = {}
         self.target_resistance = None
 
@@ -262,6 +262,19 @@ class _Device:
 
 
 class TrainerLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_target_heart_rate_support_tracks_active_connection(self):
+        machine = _FakeMachine(supported_settings=["target_heart_rate"])
+        mux = TrainerMux(addr=_Device(), machine_type=object())
+
+        self.assertFalse(mux.supports_target_heart_rate)
+        with patch("bleaksport.trainer.get_client", return_value=machine):
+            await mux._connect_and_stream()
+
+        self.assertTrue(mux.supports_target_heart_rate)
+        machine.disconnect_callback(machine)
+        self.assertFalse(mux.supports_target_heart_rate)
+        await mux._disconnect()
+
     async def test_partial_machine_setup_remains_owned_for_cleanup(self):
         machine = _FakeMachine(connect_error=RuntimeError("feature read failed"))
         mux = TrainerMux(addr=_Device(), machine_type=object())
