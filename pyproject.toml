@@ -56,4 +56,4 @@ ignore = [
 ]
 
 [tool.uv.sources]
-pyftms = { git = "https://github.com/luigi311/python-pyftms", rev = "7c828fcf8b47f4ec917edec8b9a1585db4e35352" }
+pyftms = { git = "https://github.com/luigi311/python-pyftms", rev = "b72174016b6fc8dc70f2af82da2a8f0014e745f6" }
